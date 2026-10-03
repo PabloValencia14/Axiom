@@ -18,7 +18,14 @@ Antes de abrir el PR, ejecuta lo que corresponda al cambio:
 ./gradlew assembleDebugAndroidTest
 ```
 
-Las pruebas instrumentadas se ejecutan con `./gradlew connectedDebugAndroidTest` cuando se disponga de un dispositivo/emulador. Incluye el resultado de las comprobaciones y explica cualquier prueba omitida. Cambios de persistencia deben conservar/actualizar los esquemas de Room y sus pruebas; cambios nativos requieren revisar NDK/CMake y cobertura de conversión.
+Para ejecutar pruebas instrumentadas, selecciona y autoriza explícitamente el número de serie (`SERIAL`) del emulador o dispositivo que quieras usar. No enumeres dispositivos ni uses tareas Gradle `connected...` o `install...`, que podrían dirigirse a un dispositivo distinto. Después de compilar los APKs con los comandos anteriores, instálalos y ejecuta las pruebas con:
+
+```bash
+adb -s SERIAL install app/build/outputs/apk/debug/app-debug.apk
+adb -s SERIAL install app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s SERIAL shell am instrument -w org.readera.openreadera.test/androidx.test.runner.AndroidJUnitRunner
+```
+Incluye el resultado de las comprobaciones y explica cualquier prueba omitida. Cambios de persistencia deben conservar/actualizar los esquemas de Room y sus pruebas; cambios nativos requieren revisar NDK/CMake y cobertura de conversión.
 
 ## Pull requests
 

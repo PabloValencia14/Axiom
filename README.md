@@ -35,11 +35,12 @@ Desde la raíz del repositorio:
 ./gradlew assembleDebugAndroidTest
 ```
 
-En Windows usa `gradlew.bat`. `assembleDebugAndroidTest` crea el paquete instrumentado, incluido el fixture MOBI de prueba generado desde Gradle; para ejecutar pruebas instrumentadas hace falta un emulador o dispositivo conectado:
+En Windows usa `gradlew.bat`. `assembleDebugAndroidTest` crea el paquete instrumentado, incluido el fixture MOBI de prueba generado desde Gradle. Para instalar y ejecutar pruebas instrumentadas, selecciona y autoriza explícitamente el número de serie (`SERIAL`) del emulador o dispositivo que quieras usar. No enumeres dispositivos ni uses tareas Gradle `connected...` o `install...`, que podrían dirigirse a un dispositivo distinto:
 
 ```bash
-./gradlew connectedDebugAndroidTest
-./gradlew installDebug
+adb -s SERIAL install app/build/outputs/apk/debug/app-debug.apk
+adb -s SERIAL install app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s SERIAL shell am instrument -w org.readera.openreadera.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
 El código JNI/C++ y la conversión MOBI se compilan desde `app/src/main/cpp`; todas las fuentes necesarias, incluyendo la selección vendorizada de libmobi, están en el repositorio. No depende de archivos Gradle ni bibliotecas en el directorio padre.
