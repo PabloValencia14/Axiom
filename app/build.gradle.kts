@@ -11,11 +11,11 @@ val copyMobiFixtureForAndroidTest by tasks.registering {
     outputs.dir(mobiFixtureAssets)
     doLast {
         val directory = mobiFixtureAssets.get().asFile.apply { mkdirs() }
-        val text = "Axiom local MOBI fixture. This is a self-authored test document for validating plain-text MOBI conversion, search, cleanup, and DRM rejection."
+        val text = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Axiom MOBI test</title></head><body><p>Axiom local MOBI fixture validates text MOBI conversion, search, cleanup, and DRM rejection.</p></body></html>"
         val title = "Axiom MOBI test"
         val titleBytes = title.toByteArray(Charsets.UTF_8) + byteArrayOf(0)
         val textBytes = text.toByteArray(Charsets.UTF_8)
-        val record0Offset = 78 + 16
+        val record0Offset = 78 + 16 + 2
         val record0Size = 16 + 232 + titleBytes.size
         val record1Offset = record0Offset + record0Size
         val bytes = ByteArrayOutputStream()
@@ -31,17 +31,18 @@ val copyMobiFixtureForAndroidTest by tasks.registering {
         u32(0); u32(0); u16(2)
         u32(record0Offset.toLong()); out.writeByte(0); out.write(byteArrayOf(0, 0, 0))
         u32(record1Offset.toLong()); out.writeByte(0); out.write(byteArrayOf(0, 0, 0))
+        u16(0)
         u16(1); u16(0); u32(textBytes.size.toLong()); u16(1); u16(4096); u16(0); u16(0)
         out.write("MOBI".toByteArray(Charsets.US_ASCII)); u32(232); u32(2); u32(65001); u32(1); u32(6)
         out.write(ByteArray(40) { 0xff.toByte() })
-        u32(0); u32((16 + 232).toLong()); u32(titleBytes.size.toLong()); u32(9); u32(0); u32(0); u32(6)
-        u32(0xffffffffL); u32(0xffffffffL); u32(0); u32(0); u32(0); u32(0)
-        out.write(ByteArray(36))
+        u32(0xffffffffL); u32((16 + 232).toLong()); u32(titleBytes.size.toLong()); u32(9); u32(0); u32(0); u32(6)
+        u32(0xffffffffL); u32(0xffffffffL); u32(0); u32(0xffffffffL); u32(0); u32(0)
+        out.write(ByteArray(32)); u32(0xffffffffL)
         u32(0xffffffffL); u32(0); u32(0); u32(0)
-        out.write(ByteArray(2))
-        u16(0xffff)
-        u32(0); u32(0); u32(0); u32(0)
-        out.write(ByteArray(44))
+        out.write(ByteArray(8))
+        u16(1); u16(1)
+        u32(0); u32(0xffffffffL); u32(0); u32(0xffffffffL); u32(0); u32(0); u32(0)
+        u32(0xffffffffL); u32(0); u32(0); u32(0); u16(0); u16(0); u32(0xffffffffL)
         check(bytes.size() == record0Offset + 16 + 232)
         out.write(titleBytes)
         check(bytes.size() == record1Offset)
