@@ -730,6 +730,265 @@ class ReaderInkTest {
         }
     }
     @Test
+    fun floatingToolbarRendersWithoutVisibleTextAndOverlayDoesNotResizeViewport() = runBlocking {
+        val target = instrumentation.targetContext
+        val prefix = "floating_bar_${System.nanoTime()}_"
+        val names = mutableSetOf<String>()
+        val context = object : ContextWrapper(target) {
+            override fun getSharedPreferences(name: String, mode: Int): android.content.SharedPreferences {
+                val isolated = prefix + name
+                synchronized(names) { names.add(isolated) }
+                return super.getSharedPreferences(isolated, mode)
+            }
+        }
+        context.getSharedPreferences("google_sync_prefs", Context.MODE_PRIVATE).edit()
+            .putBoolean("explicitly_signed_out", true).commit()
+        context.getSharedPreferences("drive_sync_data", Context.MODE_PRIVATE).edit()
+            .putBoolean("auto_sync_enabled", false).commit()
+        val file = fixture(context)
+        val databaseName = prefix + "reader.db"
+        val database = Room.databaseBuilder(context, AppDatabase::class.java, databaseName).build()
+        fun repository() = BookRepository(database.bookDao(), database.bookmarkDao(), database.quoteDao(),
+            database.collectionDao(), database.searchHistoryDao(), database.drawingStrokeDao())
+        val repo = repository()
+        val bookId = repo.insertBook(Book(title = "Prueba barra flotante", filePath = file.path, format = "PDF"))
+        val preferences = ReaderPreferences(context).apply { updateTheme(ReaderColorTheme.DAY) }
+        val dark = mutableStateOf(false)
+        val store = ViewModelStore()
+        lateinit var model: ReaderViewModel
+        lateinit var activity: ReaderInkTestActivity
+        val scenario = ActivityScenario.launch(ReaderInkTestActivity::class.java)
+        var restoreDisplay: String? = null
+        fun mount() {
+            scenario.onActivity {
+                activity = it
+                model = ReaderViewModel(bookId, repo, preferences, EngineManager(context), context)
+                store.put("ink", model)
+                it.setContent {
+                    OpenReadEraTheme(appThemeMode = if (dark.value) AppThemeMode.DARK else AppThemeMode.LIGHT) {
+                        ReaderScreen(model, onBack = {}, onOpenDocumentDetails = {})
+                    }
+                }
+            }
+            awaitCondition {
+                var ready = false
+                main { ready = overlays(activity.window.decorView).isNotEmpty() }
+                ready && model.uiState.value.currentPageBitmap != null
+            }
+        }
+        fun currentOverlay(): ReaderInkView {
+            waitForFrame(activity.window.decorView)
+            var result: ReaderInkView? = null
+            awaitCondition {
+                main { result = overlays(activity.window.decorView).firstOrNull() }
+                result?.let { it.isAttachedToWindow && it.isLaidOut && it.width > 0 && it.height > 0 } == true
+            }
+            instrumentation.waitForIdleSync()
+            return checkNotNull(result)
+        }
+        fun openMenu(stylus: Boolean = false) {
+            currentOverlay()
+            if (model.uiState.value.writingMode) {
+                node("Pluma")
+                return
+            }
+            if (!model.uiState.value.isControlsVisible) {
+                fingerTap(currentOverlay())
+                awaitCondition { model.uiState.value.isControlsVisible }
+            }
+            if (activity.resources.configuration.screenWidthDp < 600) tapNode("Más opciones", stylus)
+            tapNode("Herramientas de escritura", stylus)
+            node("Pluma")
+        }
+        fun dismissMenu() {
+            tapNode("Cerrar escritura")
+            awaitCondition { findNode("Pluma") == null }
+        }
+        try {
+            mount()
+            instrumentation.uiAutomation.serviceInfo = instrumentation.uiAutomation.serviceInfo.apply {
+                flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            }
+            val overlayBefore = currentOverlay()
+            val initialWidth = overlayBefore.width
+            assertTrue("Initial overlay width must be positive", initialWidth > 0)
+
+            // Open writing mode
+            openMenu()
+            assertTrue(model.uiState.value.writingMode)
+
+            // 1. Viewport geometry invariant: viewport/overlay width must be 100% identical (no writingEndPadding side reservation)
+            val overlayDuringWriting = currentOverlay()
+            assertEquals("Document viewport width remains 100% identical when writing mode is active",
+                initialWidth, overlayDuringWriting.width)
+
+            // 2. Floating bar bounds: overlay is positioned within document window bounds
+            val plumaNode = node("Pluma")
+            val plumaBounds = Rect().also(plumaNode::getBoundsInScreen)
+            val decorBounds = Rect()
+            main { activity.window.decorView.getGlobalVisibleRect(decorBounds) }
+            assertTrue("Floating bar overlay bounds are within document decor bounds", decorBounds.contains(plumaBounds))
+
+            // 3. UI no-text regression: all controls have accessible contentDescription, but ZERO visible text
+            val toolLabels = listOf("Pluma", "Rotulador", "Resaltador libre", "Resaltar texto", "Goma")
+            for (toolLabel in toolLabels) {
+                val n = node(toolLabel)
+                assertEquals(toolLabel, n.contentDescription?.toString())
+                assertTrue("Tool '$toolLabel' must have NO visible text", n.text.isNullOrEmpty())
+            }
+
+            val widthLabels = listOf("Grosor Fino", "Grosor Medio", "Grosor Grueso")
+            for (widthLabel in widthLabels) {
+                val n = node(widthLabel)
+                assertEquals(widthLabel, n.contentDescription?.toString())
+                assertTrue("Width sample '$widthLabel' must have NO visible text", n.text.isNullOrEmpty())
+            }
+
+            val colorLabels = listOf("Color Amarillo", "Color Verde", "Color Azul", "Color Coral", "Color Naranja", "Color Negro")
+            for (colorLabel in colorLabels) {
+                val n = node(colorLabel)
+                assertEquals(colorLabel, n.contentDescription?.toString())
+                assertTrue("Color swatch '$colorLabel' must have NO visible text", n.text.isNullOrEmpty())
+            }
+
+            val actionLabels = listOf("Deshacer trazo", "Rehacer trazo", "Borrar trazos de la página", "Cerrar escritura")
+            for (actionLabel in actionLabels) {
+                val n = node(actionLabel)
+                assertEquals(actionLabel, n.contentDescription?.toString())
+                assertTrue("Action '$actionLabel' must have NO visible text", n.text.isNullOrEmpty())
+            }
+
+            // Verify no persistent text nodes in the bar (no headers or descriptions)
+            assertNull("No title text node in bar", findNode("Herramientas de escritura")?.takeIf {
+                it.text?.toString() == "Herramientas de escritura" && !it.isClickable
+            })
+
+            // 4. Interactive tool selection via UI
+            tapNode("Rotulador")
+            awaitCondition { model.uiState.value.currentDrawingTool == DrawingTool.MARKER }
+            tapNode("Resaltador libre")
+            awaitCondition { model.uiState.value.currentDrawingTool == DrawingTool.FREE_HIGHLIGHTER }
+            tapNode("Resaltar texto")
+            awaitCondition { model.uiState.value.currentDrawingTool == DrawingTool.HIGHLIGHTER }
+            tapNode("Goma")
+            awaitCondition { model.uiState.value.currentDrawingTool == DrawingTool.ERASER }
+
+            // Contextual hiding: eraser mode shows NO width or color swatches
+            assertNull("Eraser hides stroke width swatches", findNode("Grosor Fino"))
+            assertNull("Eraser hides color swatches", findNode("Color Amarillo"))
+
+            tapNode("Pluma")
+            awaitCondition { model.uiState.value.currentDrawingTool == DrawingTool.PEN }
+            assertNotNull("Pen restores stroke width swatches", findNode("Grosor Fino"))
+            assertNotNull("Pen restores color swatches", findNode("Color Amarillo"))
+
+            // 5. Interactive stroke width selection via UI
+            tapNode("Grosor Medio")
+            awaitCondition { model.uiState.value.currentStrokeWidth == 4f }
+            tapNode("Grosor Grueso")
+            awaitCondition { model.uiState.value.currentStrokeWidth == 8f }
+            tapNode("Grosor Fino")
+            awaitCondition { model.uiState.value.currentStrokeWidth == 2f }
+
+            // 6. Interactive color selection via UI
+            tapNode("Color Coral")
+            awaitCondition { model.uiState.value.currentStrokeColorHex.equals("#F87171", ignoreCase = true) }
+            tapNode("Color Azul")
+            awaitCondition { model.uiState.value.currentStrokeColorHex.equals("#60A5FA", ignoreCase = true) }
+
+            // 7. Drawing outside floating bar creates a stroke without dismissing the bar
+            val inkView = currentOverlay()
+            stroke(inkView, 0.2f, 0.55f, 0.7f, 0.55f)
+            awaitCondition { model.uiState.value.strokes.size == 1 }
+            assertTrue("Writing mode retained after outside stroke", model.uiState.value.writingMode)
+            assertNotNull("Floating bar retained after outside stroke", findNode("Pluma"))
+
+            // 8. Undo and Redo actions via UI
+            tapNode("Deshacer trazo")
+            awaitCondition { model.uiState.value.strokes.isEmpty() }
+            tapNode("Rehacer trazo")
+            awaitCondition { model.uiState.value.strokes.size == 1 }
+
+            // 9. Clear confirmation dialog guarded behavior
+            tapNode("Borrar trazos de la página")
+            node("¿Borrar trazos?")
+            tapNode("Cancelar")
+            assertEquals(1, model.uiState.value.strokes.size)
+            tapNode("Borrar trazos de la página")
+            node("¿Borrar trazos?")
+            tapNode("Borrar")
+            awaitCondition { model.uiState.value.strokes.isEmpty() }
+
+            // 10. Close button closes writing mode
+            tapNode("Cerrar escritura")
+            awaitCondition { !model.uiState.value.writingMode }
+            awaitCondition { findNode("Pluma") == null }
+
+            // Viewport width remains identical after closing writing mode
+            assertEquals("Viewport width remains identical when writing mode is closed",
+                initialWidth, currentOverlay().width)
+
+            // 11. Screenshots in light, dark, landscape, portrait, and narrow modes
+            openMenu()
+            screenshot("floating-toolbar-tablet-light")
+            dismissMenu()
+
+            main { dark.value = true }
+            openMenu(stylus = true)
+            screenshot("floating-toolbar-tablet-dark")
+            dismissMenu()
+
+            assertTrue(instrumentation.uiAutomation.setRotation(android.view.Surface.ROTATION_90))
+            awaitCondition { activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE }
+            openMenu()
+            screenshot("floating-toolbar-tablet-landscape")
+            dismissMenu()
+
+            assertTrue(instrumentation.uiAutomation.setRotation(android.view.Surface.ROTATION_0))
+            awaitCondition { activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT }
+            openMenu()
+            screenshot("floating-toolbar-tablet-portrait")
+            dismissMenu()
+
+            val originalSize = android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("wm size")).bufferedReader().use { it.readText() }
+            val originalOverride = originalSize.lineSequence().firstOrNull { it.startsWith("Override size: ") }
+                ?.substringAfter(": ")?.trim()
+            restoreDisplay = if (originalOverride == null) "wm size reset" else "wm size $originalOverride"
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand("wm size 760x1600")).use { it.readBytes() }
+            awaitCondition { activity.resources.configuration.screenWidthDp < 600 }
+            openMenu()
+            screenshot("floating-toolbar-narrow")
+            dismissMenu()
+
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand(checkNotNull(restoreDisplay))).use { it.readBytes() }
+            restoreDisplay = null
+            awaitCondition { activity.resources.configuration.screenWidthDp >= 600 }
+
+            instrumentation.sendStatus(0, Bundle().apply { putString("stream",
+                "Floating ink bar smoke: no-text regression, viewport stability, tool/color/width selection, outside drawing, and screenshots passed.\n") })
+        } catch (failure: Throwable) {
+            saveAccessibilityEvidence()
+            screenshot("floating-toolbar-failure")
+            throw failure
+        } finally {
+            restoreDisplay?.let { command ->
+                android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                    instrumentation.uiAutomation.executeShellCommand(command)).use { it.readBytes() }
+            }
+            main { activity.setContent {}; store.clear() }
+            scenario.close()
+            instrumentation.uiAutomation.setRotation(android.app.UiAutomation.ROTATION_UNFREEZE)
+            delay(600)
+            database.close()
+            target.deleteDatabase(databaseName)
+            file.delete()
+            synchronized(names) { names.forEach(target::deleteSharedPreferences) }
+        }
+    }
+    @Test
     fun realReaderResolvesRasterPdfAndComicWordsAndRoutesWritingNavigation() = runBlocking {
         val target = instrumentation.targetContext
         val prefix = "reader_ocr_${System.nanoTime()}_"

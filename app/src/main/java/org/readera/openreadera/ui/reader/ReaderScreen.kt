@@ -477,8 +477,6 @@ fun ReaderScreen(
 
     val readingTopPadding = with(density) { effectiveTopBarHeight.toDp() }
     val readingBottomPadding = with(density) { effectiveBottomBarHeight.toDp() }
-    val writingEndPadding = if (state.writingMode && !isPresenting &&
-        LocalConfiguration.current.screenWidthDp >= 600) 364.dp else 0.dp
 
     LaunchedEffect(viewportSize) {
         if (zoomScale > 1.02f && viewportSize.width > 0 && viewportSize.height > 0) {
@@ -607,7 +605,6 @@ fun ReaderScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = readingTopPadding, bottom = readingBottomPadding)
-                .padding(end = writingEndPadding)
                 .clipToBounds()
                 .nestedScroll(writingScrollGuard)
                 .onSizeChanged { size ->
@@ -1022,11 +1019,17 @@ fun ReaderScreen(
         }
 
         if (state.writingMode && !isPresenting) {
-            BoxWithConstraints(
-                modifier = Modifier.fillMaxSize().safeDrawingPadding()
-                    .padding(top = readingTopPadding, bottom = readingBottomPadding, end = 12.dp, start = 12.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .safeDrawingPadding()
+                    .padding(
+                        top = if (readingTopPadding > 0.dp) readingTopPadding + 8.dp else 12.dp,
+                        bottom = if (readingBottomPadding > 0.dp) readingBottomPadding + 8.dp else 12.dp,
+                        start = 12.dp,
+                        end = 12.dp
+                    )
             ) {
-                val wide = maxWidth >= 600.dp
                 ReaderWritingPanel(
                     currentTool = state.currentDrawingTool,
                     currentColorHex = state.currentStrokeColorHex,
@@ -1042,9 +1045,7 @@ fun ReaderScreen(
                     onClearPage = { viewModel.clearPageStrokes() },
                     onClose = { viewModel.setWritingMode(false) },
                     textStatus = activePageText?.status ?: "Preparando texto…",
-                    modifier = Modifier.align(if (wide) Alignment.CenterEnd else Alignment.BottomEnd)
-                        .widthIn(max = 340.dp)
-                        .heightIn(max = if (wide) maxHeight else maxHeight * 0.48f)
+                    modifier = Modifier.align(Alignment.TopCenter)
                 )
             }
         }

@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.1 — 2026-10-03
+- Render writing tools as a compact floating capsule bar overlay directly over the document viewport, removing the 364 dp side reservation and preserving full viewport width across writing state transitions.
+- Streamline the toolbar into an icon-only Concepts-inspired instrument strip (5 tools, 3 stroke line samples, 6 color discs, nonmodal undo/redo/clear, OCR status icon, and explicit close button) with zero persistent visible text in the bar and full accessibility semantics intact. Contextual width and color controls are hidden in eraser mode.
+- Adapt layout responsively between a sleek single-row horizontal capsule on tablet (landscape and portrait) and a compact <=144 dp two-row layout on narrow viewports with the close control pinned and tool rows horizontally scrollable without clipping.
+- Prevent panel surface taps from triggering ink strokes or page turns beneath, while drawing outside the bar continues uninterrupted without dismissing the panel.
+- Validate via ReaderInkTest on authorized Xiaomi Pad 7 (97c290d2): all 3 test cases passed (focused floating toolbar smoke/no-text regression, durable ink persistence/replay/rotation, and real OCR/highlight routing) with fresh light, dark, landscape, portrait, and narrow proof screenshots captured.
 - Vendor the required libmobi C sources and licensing texts so native MOBI conversion builds without parent-directory dependencies; generate the self-authored MOBI test fixture during Android test builds.
 - Add Spanish build/privacy/limitations and contribution guidance, AGPL-3.0-or-later license, safe issue/security templates, and Android CI/debug-signed tagged releases with checksums.
 - Deploy writing tools in a persistent nonmodal panel controlled by explicit writing mode, independent of auto-hidden reader chrome. Tool/color/width and page-scoped undo/redo/clear actions retain the panel; its close control stays pinned while settings scroll.
