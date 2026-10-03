@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.0.12077973' 'cmake;3.22.1'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          app_version=$(grep -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          test -n "$app_version"
+          test "$tag_version" = "$app_version"
+      - name: Build debug-key-signed release APK
+        run: ./gradlew assembleRelease
+      - name: Prepare release assets and checksums
+        shell: bash
+        run: |
+          apk=$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$apk"
+          mkdir -p release-assets
+          cp "$apk" "release-assets/Axiom-${GITHUB_REF_NAME}-debug-signed.apk"
+          cd release-assets
+          sha256sum *.apk > SHA256SUMS.txt
+          printf '%s\n' 'Development build signed with the Android debug key. Not a production-signed APK; updates require this same debug signing key.' > SIGNING.txt
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "Axiom $GITHUB_REF_NAME"

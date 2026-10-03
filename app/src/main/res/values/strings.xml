@@ -1,0 +1,45 @@
+<resources>
+    <string name="app_name">Axiom</string>
+    <string name="tab_reading_now">Leyendo</string>
+    <string name="tab_library">Biblioteca</string>
+    <string name="tab_quotes">Citas y Notas</string>
+    <string name="tab_settings">Ajustes</string>
+
+    <string name="filter_all">Todos</string>
+    <string name="filter_reading">Leyendo</string>
+    <string name="filter_favorites">Favoritos</string>
+    <string name="filter_to_read">Por leer</string>
+    <string name="filter_have_read">Leídos</string>
+
+    <string name="sort_by">Ordenar por</string>
+    <string name="sort_title">Título</string>
+    <string name="sort_author">Autor</string>
+    <string name="sort_recent">Último leído</string>
+    <string name="sort_date_added">Fecha de adición</string>
+    <string name="sort_size">Tamaño</string>
+    <string name="sort_progress">Progreso</string>
+
+    <string name="search_hint">Buscar libros, autores, formatos…</string>
+    <string name="empty_library">No se han encontrado documentos</string>
+    <string name="empty_library_desc">Pulsa en el botón para escanear el almacenamiento o abrir un archivo.</string>
+    <string name="scan_storage">Escanear almacenamiento</string>
+    <string name="open_file">Abrir archivo</string>
+
+    <string name="reader_day">Día</string>
+    <string name="reader_night">Noche</string>
+    <string name="reader_sepia">Sepia</string>
+    <string name="reader_oled">OLED</string>
+
+    <string name="mode_paged">Paginado</string>
+    <string name="mode_double">Doble página</string>
+    <string name="mode_vertical">Desplazamiento</string>
+    <string name="mode_reflow">Reflow</string>
+
+    <string name="toc_title">Índice</string>
+    <string name="bookmarks_title">Marcadores</string>
+    <string name="quotes_title">Citas y Notas</string>
+
+    <string name="tts_play">Leer en voz alta</string>
+    <string name="tts_pause">Pausar</string>
+    <string name="tts_speed">Velocidad</string>
+</resources>

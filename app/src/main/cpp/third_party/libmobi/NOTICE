@@ -1,0 +1,5 @@
+libmobi
+
+The vendored C sources and headers in src/ and tools/common.{c,h} are from libmobi, copyright © Bartek Fabiszewski, and are licensed under the GNU Lesser General Public License version 3 or (at your option) any later version. The corresponding license texts are included as COPYING and lgpl-3.0.txt. Source: upstream OpenReadEra-26.05.20/eramobi; only the C sources/headers needed by this app's MOBI converter were copied.
+
+The app links this library into its JNI shared library. The source code for the library is included here to support modification/relinking under LGPL terms. Consult COPYING for the complete applicable terms.

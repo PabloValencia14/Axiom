@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <include domain="database" path="."/>
+    <include domain="sharedpref" path="."/>
+    <exclude domain="sharedpref" path="google_sync_prefs.xml"/>
+    <exclude domain="sharedpref" path="zlibrary_prefs.xml"/>
+    <exclude domain="sharedpref" path="opds_catalog_prefs.xml"/>
+    <exclude domain="sharedpref" path="openreadera_openrouter_secrets.xml"/>
+</full-backup-content>

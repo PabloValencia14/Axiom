@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Instrumented reader regression host; no launcher, scanner or navigation side effects. -->
+        <activity android:name=".ui.reader.components.ReaderInkTestActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density" />
+    </application>
+</manifest>
