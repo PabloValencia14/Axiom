@@ -31,6 +31,8 @@ import org.readera.openreadera.data.stats.ReadingStatsManager
 import org.readera.openreadera.engine.*
 import org.readera.openreadera.tts.NaturalTtsPlayer
 import org.readera.openreadera.ui.reader.components.DrawingTool
+import org.readera.openreadera.ui.reader.components.ReaderRenderCache
+import org.readera.openreadera.ui.reader.components.readerPrefetchPages
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -103,18 +105,19 @@ class ReaderViewModel(
     private var engine: DocumentEngine? = null
     private var activeRenderJob: Job? = null
     private var prefetchJob: Job? = null
+    private var renderOptionsJob: Job? = null
     private var searchJob: Job? = null
+    private var ttsStartJob: Job? = null
     private var searchGeneration = 0
     private val persistentScope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     private val drawingMutationLock = Any()
     private var lastDrawingMutation: Job? = null
     private val redoStack = java.util.concurrent.ConcurrentLinkedDeque<DrawingStroke>()
-    // Bound by bytes: portrait papers cost much more than landscape slides.
-    private val highResCache = bitmapCache((Runtime.getRuntime().maxMemory() / 4)
+    private var navigationDirection = 1
+    private val renderCache = ReaderRenderCache((Runtime.getRuntime().maxMemory() / 4)
         .coerceIn(32L * 1024 * 1024, 128L * 1024 * 1024).toInt())
 
     private val ttsSleepTimer = TtsSleepTimer(viewModelScope, ::stopTts)
-    private val previewCache = bitmapCache(24 * 1024 * 1024)
     // Filled on the existing IO render path, never by Compose. Bitmap rounding is not page geometry.
     private val pageAspectRatios = ConcurrentHashMap<Int, Float>()
     private val pageTextCache = object : LruCache<Int, ReaderPageTextState>(2 * 1024 * 1024) {
@@ -221,15 +224,10 @@ class ReaderViewModel(
                 }
         }
 
-    private fun bitmapCache(bytes: Int) = object : LruCache<Int, Bitmap>(bytes) {
-        override fun sizeOf(key: Int, value: Bitmap) = value.allocationByteCount
-    }
-
     private fun invalidateRenderedPages() {
         activeRenderJob?.cancel()
         prefetchJob?.cancel()
-        highResCache.evictAll()
-        previewCache.evictAll()
+        renderCache.clear()
     }
     private val statsManager by lazy { ReadingStatsManager(context) }
     private var lastPageTurnTimeMs = System.currentTimeMillis()
@@ -251,7 +249,7 @@ class ReaderViewModel(
                     )
                 }
             },
-            onError = { _ -> },
+            onError = { message -> _uiState.update { it.copy(error = message) } },
             initialSpeechRate = preferences.ttsSpeechRate.value,
             initialOnlineTtsEnabled = preferences.useNeuralTtsOnline.value
         )
@@ -407,27 +405,7 @@ class ReaderViewModel(
             currentTargetAspectRatio = newRatio
             val currentEngine = engine
             if (currentEngine != null) {
-                val settings = _uiState.value.settings
-                val options = createRenderOptions(settings)
-                invalidateRenderedPages()
-                viewModelScope.launch {
-                    val oldPage = _uiState.value.currentPage
-                    val progress = getCurrentProgressRatio()
-                    val newCount = withContext(Dispatchers.IO) {
-                        synchronized(currentEngine) { currentEngine.applyOptions(options) }
-                    }
-                    invalidatePageText()
-                    highResCache.evictAll()
-                    previewCache.evictAll()
-                    val newPage = if (progress > 0f) {
-                        (progress * (newCount - 1)).toInt().coerceIn(0, maxOf(0, newCount - 1))
-                    } else {
-                        oldPage.coerceIn(0, maxOf(0, newCount - 1))
-                    }
-                    val newRemaining = calculateEstimatedTimeRemaining(newPage, newCount)
-                    _uiState.update { it.copy(totalPages = newCount, currentPage = newPage, estimatedMinutesRemaining = newRemaining) }
-                    renderCurrentPage()
-                }
+                applyOptionsAndRender(currentEngine)
             }
         }
     }
@@ -450,16 +428,52 @@ class ReaderViewModel(
 
     private fun applyThemeAndRerender() {
         val currentEngine = engine ?: return
-        val settings = _uiState.value.settings
-        val options = createRenderOptions(settings)
-        invalidateRenderedPages()
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                synchronized(currentEngine) { currentEngine.applyOptions(options) }
-            }
-            highResCache.evictAll()
-            previewCache.evictAll()
+        if (currentEngine is AndroidPdfEngine) {
+            invalidateRenderedPages()
             renderCurrentPage()
+        } else {
+            applyOptionsAndRender(currentEngine)
+        }
+    }
+
+    private fun applyOptionsAndRender(currentEngine: DocumentEngine) {
+        renderOptionsJob?.cancel()
+        invalidateRenderedPages()
+        val options = createRenderOptions(_uiState.value.settings)
+        renderOptionsJob = viewModelScope.launch {
+            try {
+                _uiState.update { it.copy(isLoadingPage = true, error = null) }
+                val count = withContext(Dispatchers.IO) {
+                    val optionsContext = currentCoroutineContext()
+                    synchronized(currentEngine) {
+                        optionsContext.ensureActive()
+                        currentEngine.applyOptions(options).coerceAtLeast(1)
+                    }
+                }
+                // Navigation while reflow was running still uses the previous page count.
+                val oldPage = _uiState.value.currentPage
+                val progress = getCurrentProgressRatio()
+                val page = if (progress > 0f) (progress * (count - 1)).toInt().coerceIn(0, count - 1)
+                    else oldPage.coerceIn(0, count - 1)
+                invalidatePageText()
+                pageAspectRatios.clear()
+                _uiState.update {
+                    it.copy(totalPages = count, currentPage = page,
+                        activeInkPage = if (oldPage == page) it.activeInkPage else page,
+                        currentPageBitmap = if (oldPage == page) it.currentPageBitmap else null,
+                        secondPageBitmap = if (oldPage == page) it.secondPageBitmap else null,
+                        estimatedMinutesRemaining = calculateEstimatedTimeRemaining(page, count)).withInkActions()
+                }
+                renderOptionsJob = null
+                renderCurrentPage()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Unable to apply reader options", error)
+                _uiState.update { it.copy(isLoadingPage = false, error = "No se pudo actualizar la configuración de lectura") }
+            } finally {
+                if (renderOptionsJob === currentCoroutineContext()[Job]) renderOptionsJob = null
+            }
         }
     }
 
@@ -525,6 +539,7 @@ class ReaderViewModel(
                     val opened = try {
                         activeEngine.open(book.filePath)
                     } catch (openError: Exception) {
+                        if (openError is CancellationException) throw openError
                         Log.w(TAG, "Error opening ${activeEngine::class.simpleName}", openError)
                         false
                     }
@@ -585,6 +600,7 @@ class ReaderViewModel(
                         docEngine?.close()
                     } catch (_: Exception) {
                     }
+                    if (e is CancellationException) throw e
                     Log.e(TAG, "Error initializing reader engine", e)
                     _uiState.update {
                         it.copy(isLoadingPage = false, error = e.message ?: "No se pudo abrir ${book.format}")
@@ -617,29 +633,10 @@ class ReaderViewModel(
                     renderCurrentPage()
                     return@collect
                 }
-                invalidateRenderedPages()
-                if (currentEngine != null) {
-                    val options = createRenderOptions(settings)
-                    val oldPage = _uiState.value.currentPage
-                    val progress = getCurrentProgressRatio()
-                    val newCount = withContext(Dispatchers.IO) {
-                        synchronized(currentEngine) { currentEngine.applyOptions(options) }
-                    }
-                    invalidatePageText()
-                    highResCache.evictAll()
-                    previewCache.evictAll()
-                    val newPage = if (progress > 0f) {
-                        (progress * (newCount - 1)).toInt().coerceIn(0, maxOf(0, newCount - 1))
-                    } else {
-                        oldPage.coerceIn(0, maxOf(0, newCount - 1))
-                    }
-                    val newRemaining = calculateEstimatedTimeRemaining(newPage, newCount)
-                    _uiState.update { it.copy(totalPages = newCount, currentPage = newPage, estimatedMinutesRemaining = newRemaining) }
-                } else {
-                    highResCache.evictAll()
-                    previewCache.evictAll()
-                }
-                renderCurrentPage()
+                val samePixels = createRenderOptions(previousSettings) == createRenderOptions(settings)
+                if (samePixels && prevViewMode == settings.viewMode) return@collect
+                if (currentEngine != null) applyOptionsAndRender(currentEngine)
+                else invalidateRenderedPages()
             }
         }
     }
@@ -767,6 +764,9 @@ class ReaderViewModel(
         val isDouble = isDoublePageMode(currentState.settings)
 
         if (validPage == currentState.currentPage && currentState.currentPageBitmap != null) return
+        if (validPage != currentState.currentPage) {
+            navigationDirection = if (validPage > currentState.currentPage) 1 else -1
+        }
 
         trackPageReadingTime()
         val remainingMin = calculateEstimatedTimeRemaining(validPage, total)
@@ -780,8 +780,8 @@ class ReaderViewModel(
         prefetchJob?.cancel()
 
         // 2. Check Tier 1 (High-Res Cache) for instantaneous 0ms crisp display
-        val highFirst = highResCache.get(validPage)
-        val highSecond = if (isDouble && validPage + 1 < total) highResCache.get(validPage + 1) else null
+        val highFirst = renderCache.get(validPage)
+        val highSecond = if (isDouble && validPage + 1 < total) renderCache.get(validPage + 1) else null
         val isFullHighHit = highFirst != null && (!isDouble || validPage + 1 >= total || highSecond != null)
 
         if (isFullHighHit) {
@@ -792,6 +792,7 @@ class ReaderViewModel(
                     currentPageBitmap = highFirst,
                     secondPageBitmap = highSecond,
                     isLoadingPage = false,
+                    error = null,
                     readingAnchorPage = anchor,
                     estimatedMinutesRemaining = remainingMin,
                     canUndo = strokesOnPage(it.strokes, validPage).isNotEmpty(),
@@ -804,13 +805,11 @@ class ReaderViewModel(
         }
 
         // 3. Check Tier 2 (Preview / Puntos Cache - "páginas no cargadas por completo")
-        val prevFirst = highFirst ?: previewCache.get(validPage)
-        val prevSecond = if (isDouble && validPage + 1 < total) (highSecond ?: previewCache.get(validPage + 1)) else null
+        val prevFirst = highFirst ?: renderCache.get(validPage, preview = true)
+        val prevSecond = if (isDouble && validPage + 1 < total) (highSecond ?: renderCache.get(validPage + 1, preview = true)) else null
         val hasPreview = prevFirst != null && (!isDouble || validPage + 1 >= total || prevSecond != null)
 
         if (hasPreview) {
-            // INSTANTANEOUS 0ms PREVIEW DISPLAY!
-            // Screen updates immediately with preview proxy; zero freeze even after dozens of fast taps!
             _uiState.update {
                 it.copy(
                     currentPage = validPage,
@@ -818,6 +817,7 @@ class ReaderViewModel(
                     currentPageBitmap = prevFirst,
                     secondPageBitmap = prevSecond,
                     isLoadingPage = false,
+                    error = null,
                     readingAnchorPage = anchor,
                     estimatedMinutesRemaining = remainingMin,
                     canUndo = strokesOnPage(it.strokes, validPage).isNotEmpty(),
@@ -825,17 +825,19 @@ class ReaderViewModel(
                 ).withInkActions()
             }
             saveProgressNow(validPage)
-            // Schedule high-res focus and prefetch in background
-            renderHighResCurrentPage(validPage)
+            renderCurrentPageWithFastPreview(validPage)
             return
         }
 
         // 4. Cache miss on both tiers (e.g. huge jump on slider)
-        // Immediately generate lightweight preview on IO so screen updates right away (~3-5ms)
+        // Drop the old page immediately: its pixels and ink must not be labeled as the new page.
         _uiState.update {
             it.copy(
                 currentPage = validPage,
                 activeInkPage = validPage,
+                currentPageBitmap = null,
+                secondPageBitmap = null,
+                error = null,
                 isLoadingPage = true,
                 readingAnchorPage = anchor,
                 estimatedMinutesRemaining = remainingMin,
@@ -895,179 +897,82 @@ class ReaderViewModel(
         renderCurrentPageWithFastPreview(_uiState.value.currentPage)
     }
 
-    private fun renderHighResCurrentPage(targetPage: Int) {
-        val currentEngine = engine ?: return
-        val state = _uiState.value
-        val settings = state.settings
-        val isDouble = isDoublePageMode(settings)
-        val total = state.totalPages
-
-        activeRenderJob?.cancel()
-        prefetchJob?.cancel()
-        activeRenderJob = viewModelScope.launch {
-            val options = createRenderOptions(settings)
-            val fullFirst = highResCache.get(targetPage) ?: renderSinglePageToBitmap(targetPage, currentEngine, options, isDouble, isPreview = false)
-            if (fullFirst != null) highResCache.put(targetPage, fullFirst)
-
-            var fullSecond: Bitmap? = null
-            if (isDouble && targetPage + 1 < total) {
-                fullSecond = highResCache.get(targetPage + 1) ?: renderSinglePageToBitmap(targetPage + 1, currentEngine, options, isDouble, isPreview = false)
-                if (fullSecond != null) highResCache.put(targetPage + 1, fullSecond)
-            }
-
-            if (targetPage == _uiState.value.currentPage && fullFirst != null) {
-                _uiState.update {
-                    it.copy(
-                        currentPageBitmap = fullFirst,
-                        secondPageBitmap = fullSecond,
-                        isLoadingPage = false
-                    )
-                }
-                schedulePrefetch(targetPage)
-            }
-        }
-    }
-
     private fun renderCurrentPageWithFastPreview(targetPage: Int) {
         val currentEngine = engine ?: return
+        if (renderOptionsJob?.isActive == true) return
         val state = _uiState.value
         val settings = state.settings
         val isDouble = isDoublePageMode(settings)
-        val total = state.totalPages
+        val needsSecond = isDouble && targetPage + 1 < state.totalPages
 
         activeRenderJob?.cancel()
         prefetchJob?.cancel()
         activeRenderJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingPage = true, error = null) }
             val options = createRenderOptions(settings)
-
-            // Step 1: Rapid preview first (~3-5ms) so screen displays content almost instantly!
-            var prevFirst = previewCache.get(targetPage)
-            if (prevFirst == null) {
-                prevFirst = renderSinglePageToBitmap(targetPage, currentEngine, options, isDouble, isPreview = true)
-                if (prevFirst != null) previewCache.put(targetPage, prevFirst)
-            }
-
-            var prevSecond: Bitmap? = null
-            if (isDouble && targetPage + 1 < total) {
-                prevSecond = previewCache.get(targetPage + 1)
-                if (prevSecond == null) {
-                    prevSecond = renderSinglePageToBitmap(targetPage + 1, currentEngine, options, isDouble, isPreview = true)
-                    if (prevSecond != null) previewCache.put(targetPage + 1, prevSecond)
-                }
-            }
-
-            if (targetPage == _uiState.value.currentPage && prevFirst != null) {
+            val cachedFirst = renderCache.get(targetPage)
+            val cachedSecond = if (needsSecond) renderCache.get(targetPage + 1) else null
+            val previewFirst = cachedFirst ?: renderCache.get(targetPage, preview = true)
+                ?: renderSinglePageToBitmap(targetPage, currentEngine, options, isDouble, isPreview = true)
+                    ?.also { renderCache.put(targetPage, it, preview = true) }
+            val previewSecond = if (needsSecond) {
+                cachedSecond ?: renderCache.get(targetPage + 1, preview = true)
+                    ?: renderSinglePageToBitmap(targetPage + 1, currentEngine, options, isDouble, isPreview = true)
+                        ?.also { renderCache.put(targetPage + 1, it, preview = true) }
+            } else null
+            if (previewFirst != null) {
                 _uiState.update {
-                    it.copy(
-                        currentPageBitmap = prevFirst,
-                        secondPageBitmap = prevSecond,
-                        isLoadingPage = false
-                    )
+                    it.copy(currentPageBitmap = previewFirst, secondPageBitmap = previewSecond,
+                        isLoadingPage = false).withInkActions()
                 }
             }
 
-            // Step 2: Now render full high resolution in background and sharpen page
-            val fullFirst = highResCache.get(targetPage) ?: renderSinglePageToBitmap(targetPage, currentEngine, options, isDouble, isPreview = false)
-            if (fullFirst != null) highResCache.put(targetPage, fullFirst)
-
-            var fullSecond: Bitmap? = null
-            if (isDouble && targetPage + 1 < total) {
-                fullSecond = highResCache.get(targetPage + 1) ?: renderSinglePageToBitmap(targetPage + 1, currentEngine, options, isDouble, isPreview = false)
-                if (fullSecond != null) highResCache.put(targetPage + 1, fullSecond)
+            val fullFirst = cachedFirst ?: renderSinglePageToBitmap(targetPage, currentEngine, options, isDouble)
+                ?.also { renderCache.put(targetPage, it) }
+            val fullSecond = if (needsSecond) {
+                cachedSecond ?: renderSinglePageToBitmap(targetPage + 1, currentEngine, options, isDouble)
+                    ?.also { renderCache.put(targetPage + 1, it) }
+            } else null
+            ensureActive()
+            _uiState.update {
+                it.copy(currentPageBitmap = fullFirst ?: previewFirst,
+                    secondPageBitmap = fullSecond ?: previewSecond,
+                    isLoadingPage = false,
+                    error = if (fullFirst == null || (needsSecond && fullSecond == null))
+                        "No se pudo cargar la página ${if (fullFirst == null) targetPage + 1 else targetPage + 2}"
+                    else null).withInkActions()
             }
-
-            if (targetPage == _uiState.value.currentPage && fullFirst != null) {
-                _uiState.update {
-                    it.copy(
-                        currentPageBitmap = fullFirst,
-                        secondPageBitmap = fullSecond,
-                        isLoadingPage = false
-                    )
-                }
-                schedulePrefetch(targetPage)
-            }
+            if (fullFirst != null && (!needsSecond || fullSecond != null)) schedulePrefetch(targetPage)
         }
     }
 
     private fun schedulePrefetch(centerPage: Int) {
         prefetchJob?.cancel()
-        // Cache publication stays on Main, so invalidation cannot race with put().
+        val currentEngine = engine ?: return
+        val state = _uiState.value
+        val isDouble = isDoublePageMode(state.settings)
+        val step = if (isDouble) 2 else 1
+        val pages = readerPrefetchPages(centerPage, state.totalPages, isDouble, navigationDirection)
+        renderCache.retainPages((pages + (centerPage until minOf(centerPage + step, state.totalPages))).toSet())
+        val options = createRenderOptions(state.settings)
+        // Publish on Main after cancellable IO; never let obsolete work repopulate the cache.
         prefetchJob = viewModelScope.launch {
-            val currentEngine = engine ?: return@launch
-            val state = _uiState.value
-            val total = state.totalPages
-            val isDouble = isDoublePageMode(state.settings)
-            val step = if (isDouble) 2 else 1
-            val options = createRenderOptions(state.settings)
-
-            if (currentEngine is AndroidPdfEngine) {
-                // Prepare the next spread sharply before any distant preview work.
-                for (offset in listOf(-step, step)) {
-                    val first = centerPage + offset
-                    for (p in first until first + step) {
-                        if (p !in 0 until total) continue
-                        ensureActive()
-                        if (highResCache.get(p) == null) {
-                            val bitmap = renderSinglePageToBitmap(p, currentEngine, options, isDouble)
-                            if (bitmap != null) highResCache.put(p, bitmap)
-                        }
-                    }
-                }
-                return@launch
-            }
-
-            // === FASE A: PUNTOS DE PREVISUALIZACIÓN MASIVA (TIER 2) ===
-            // Ráfaga ultrarrápida (~3-5ms por página) para 24 páginas adelante y 10 atrás
-            val previewPages = mutableListOf<Int>()
-            for (i in 1..12) {
-                val p = centerPage + (i * step)
-                if (p in 0 until total) {
-                    previewPages.add(p)
-                    if (isDouble && p + 1 in 0 until total) previewPages.add(p + 1)
+            // Only the next spread gets full resolution, and not while zoomed deeply.
+            if (pdfQualityZoom < 2f) {
+                val nextSpread = centerPage + navigationDirection * step
+                for (page in nextSpread until nextSpread + step) {
+                    if (page !in 0 until state.totalPages || renderCache.get(page) != null) continue
+                    ensureActive()
+                    val bitmap = renderSinglePageToBitmap(page, currentEngine, options, isDouble, isPrefetch = true)
+                    if (bitmap != null) renderCache.put(page, bitmap)
                 }
             }
-            for (i in 1..5) {
-                val p = centerPage - (i * step)
-                if (p in 0 until total) {
-                    previewPages.add(p)
-                    if (isDouble && p + 1 in 0 until total) previewPages.add(p + 1)
-                }
-            }
-
-            for (p in previewPages) {
-                if (!isActive) break
-                if (previewCache.get(p) == null && highResCache.get(p) == null) {
-                    val previewBmp = renderSinglePageToBitmap(p, currentEngine, options, isDouble, isPreview = true)
-                    if (previewBmp != null && isActive) {
-                        previewCache.put(p, previewBmp)
-                    }
-                }
-            }
-
-            // === FASE B: ALTA RESOLUCIÓN ENTORNO CERCANO (TIER 1) ===
-            // Precarga los siguientes 2 pasos y el paso anterior en alta resolución
-            val highResPages = mutableListOf<Int>()
-            for (i in 1..2) {
-                val p = centerPage + (i * step)
-                if (p in 0 until total) {
-                    highResPages.add(p)
-                    if (isDouble && p + 1 in 0 until total) highResPages.add(p + 1)
-                }
-            }
-            val prevP = centerPage - step
-            if (prevP in 0 until total) {
-                highResPages.add(prevP)
-                if (isDouble && prevP + 1 in 0 until total) highResPages.add(prevP + 1)
-            }
-
-            for (p in highResPages) {
-                if (!isActive) break
-                if (highResCache.get(p) == null) {
-                    val fullBmp = renderSinglePageToBitmap(p, currentEngine, options, isDouble, isPreview = false)
-                    if (fullBmp != null && isActive) {
-                        highResCache.put(p, fullBmp)
-                    }
-                }
+            for (page in pages) {
+                ensureActive()
+                if (renderCache.get(page) != null || renderCache.get(page, preview = true) != null) continue
+                val bitmap = renderSinglePageToBitmap(page, currentEngine, options, isDouble,
+                    isPreview = true, isPrefetch = true)
+                if (bitmap != null) renderCache.put(page, bitmap, preview = true)
             }
         }
     }
@@ -1077,7 +982,8 @@ class ReaderViewModel(
         docEngine: DocumentEngine,
         options: RenderOptions,
         isDouble: Boolean,
-        isPreview: Boolean = false
+        isPreview: Boolean = false,
+        isPrefetch: Boolean = false
     ): Bitmap? = withContext(Dispatchers.IO) {
         val renderContext = currentCoroutineContext()
         var allocated: Bitmap? = null
@@ -1085,6 +991,8 @@ class ReaderViewModel(
             synchronized(docEngine) {
                 renderContext.ensureActive()
                 val pageSize = docEngine.getPageSize(page)
+                require(pageSize.width.isFinite() && pageSize.height.isFinite() &&
+                    pageSize.width > 0f && pageSize.height > 0f) { "Invalid page dimensions" }
                 pageAspectRatios[page] = pageSize.width / maxOf(1f, pageSize.height)
                 val aspectRatio = pageSize.height / maxOf(1f, pageSize.width)
                 val baseWidth = if (isPreview) {
@@ -1101,24 +1009,16 @@ class ReaderViewModel(
                 }
                 val naturalHeight = (baseWidth * aspectRatio).toInt().coerceAtLeast(1)
                 val maxHeight = if (isPreview) 3000 else 8000
-                val isPdf = docEngine is AndroidPdfEngine
-                val renderScale = if (isPdf) {
-                    minOf(
-                        1f,
-                        maxHeight.toFloat() / naturalHeight,
-                        sqrt(MAX_PDF_PAGE_PIXELS.toDouble() / (baseWidth.toDouble() * naturalHeight)).toFloat()
-                    )
-                } else {
-                    1f
-                }
+                val maxPixels = minOf(MAX_PDF_PAGE_PIXELS,
+                    renderCache.maxBytes.toLong() / (4 * if (isDouble) 2 else 1))
+                val renderScale = minOf(1f, maxHeight.toFloat() / naturalHeight,
+                    sqrt(maxPixels.toDouble() / (baseWidth.toDouble() * naturalHeight)).toFloat())
                 val bitmapWidth = (baseWidth * renderScale).toInt().coerceAtLeast(1)
-                val height = if (isPdf) {
-                    (naturalHeight * renderScale).toInt().coerceAtLeast(1)
-                } else {
-                    naturalHeight.coerceIn(if (isPreview) 200 else 400, maxHeight)
-                }
+                val height = (naturalHeight * renderScale).toInt().coerceAtLeast(1)
                 // Android PdfRenderer rejects RGB_565, including its preview path.
                 val config = if (isPreview && docEngine !is AndroidPdfEngine) Bitmap.Config.RGB_565 else Bitmap.Config.ARGB_8888
+                val bytes = bitmapWidth.toLong() * height * if (config == Bitmap.Config.RGB_565) 2 else 4
+                if (isPrefetch && !renderCache.canFit(page, bytes, isPreview)) return@synchronized null
                 val bitmap = Bitmap.createBitmap(bitmapWidth, height, config).apply {
                     density = if (isPreview) 160 else 480
                 }
@@ -1363,7 +1263,18 @@ class ReaderViewModel(
 
     fun scanGeneratedBook(file: File) {
         viewModelScope.launch(Dispatchers.IO) {
-            StorageScanner.scanSingleFile(context, file)
+            try {
+                checkNotNull(StorageScanner.scanSingleFile(context, file)) { "Generated document was not indexed" }
+                val syncManager = org.readera.openreadera.sync.GoogleDriveSyncManager(context)
+                if (syncManager.isDriveConnected() && syncManager.isAutoSyncEnabled) {
+                    syncManager.triggerImmediateBackgroundSync()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Unable to index generated document", error)
+                _uiState.update { it.copy(error = "La copia se guardó, pero no se pudo añadir a la biblioteca.") }
+            }
         }
     }
 
@@ -1412,7 +1323,11 @@ class ReaderViewModel(
             _uiState.update { it.copy(isSearching = true, error = null) }
             try {
                 val results = withContext(Dispatchers.IO) {
-                    currentEngine.search(normalizedQuery)
+                    val searchContext = currentCoroutineContext()
+                    synchronized(currentEngine) {
+                        searchContext.ensureActive()
+                        currentEngine.search(normalizedQuery)
+                    }
                 }
                 if (generation == searchGeneration) {
                     _uiState.update { it.copy(searchResults = results) }
@@ -1432,29 +1347,38 @@ class ReaderViewModel(
         }
     }
 
-    // Natural Neural TTS implementation
     fun startTts(customText: String? = null) {
         val currentEngine = engine ?: return
-
-        viewModelScope.launch {
-            val textToRead = if (!customText.isNullOrBlank()) {
-                customText
-            } else {
-                val pageText = withContext(Dispatchers.IO) {
-                    currentEngine.getPageText(_uiState.value.currentPage)
+        val page = _uiState.value.currentPage
+        val recognizedText = _uiState.value.pageText[page]?.layout?.text.orEmpty()
+        ttsStartJob?.cancel()
+        ttsStartJob = viewModelScope.launch {
+            try {
+                val textToRead = if (!customText.isNullOrBlank()) customText else {
+                    val nativeText = withContext(Dispatchers.IO) {
+                        val speechContext = currentCoroutineContext()
+                        synchronized(currentEngine) {
+                            speechContext.ensureActive()
+                            currentEngine.getPageText(page)
+                        }
+                    }
+                    nativeText.ifBlank { recognizedText }
                 }
-                if (pageText.isNotBlank()) pageText else "Lectura de la página ${_uiState.value.currentPage + 1}"
+                ensureActive()
+                if (textToRead.isBlank()) {
+                    _uiState.update { it.copy(error = "No hay texto disponible para leer. Espera al reconocimiento de la página o selecciona un fragmento.") }
+                    return@launch
+                }
+                _uiState.update {
+                    it.copy(isTtsActive = true, isTtsPlaying = true, ttsText = textToRead, error = null)
+                }
+                naturalTtsPlayer.start(textToRead)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Unable to prepare speech for page $page", error)
+                _uiState.update { it.copy(error = "No se pudo preparar la lectura de esta página") }
             }
-
-            _uiState.update {
-                it.copy(
-                    isTtsActive = true,
-                    isTtsPlaying = true,
-                    ttsText = textToRead
-                )
-            }
-
-            naturalTtsPlayer.start(textToRead)
         }
     }
 
@@ -1480,8 +1404,9 @@ class ReaderViewModel(
     }
 
     fun stopTts() {
+        ttsStartJob?.cancel()
         ttsSleepTimer.cancel()
-        naturalTtsPlayer.stop()
+        if (naturalTtsPlayerDelegate.isInitialized()) naturalTtsPlayer.stop()
         _uiState.update { it.copy(isTtsActive = false, isTtsPlaying = false, ttsSleepTimerMinutes = null) }
     }
 
@@ -1499,10 +1424,11 @@ class ReaderViewModel(
         super.onCleared()
         activeRenderJob?.cancel()
         prefetchJob?.cancel()
+        renderOptionsJob?.cancel()
+        ttsStartJob?.cancel()
         invalidatePageText()
         if (ocrDelegate.isInitialized()) ocrDelegate.value.close()
-        highResCache.evictAll()
-        previewCache.evictAll()
+        renderCache.clear()
         val closingEngine = engine
         engine = null
         persistentScope.launch { closingEngine?.let { synchronized(it) { it.close() } } }

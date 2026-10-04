@@ -9,11 +9,14 @@ import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
+import org.readera.openreadera.core.io.TransferLimits
+import org.readera.openreadera.core.io.readBoundedText
 
 class LibGenClient(
     private val downloader: CatalogDownloader,
     private val client: OkHttpClient = defaultClient()
 ) {
+    private val requestExecutor = CatalogRequestExecutor(client)
     companion object {
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .dns(BypassDns.instance)
@@ -47,8 +50,8 @@ class LibGenClient(
                     .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                     .build()
 
-                val html = client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) resp.body?.string() else null
+                val html = requestExecutor.execute(req).use { resp ->
+                    if (resp.isSuccessful) resp.body?.let { it.byteStream().readBoundedText(TransferLimits.CATALOG_PAGE, it.contentLength()) } else null
                 } ?: continue
 
                 val doc = Jsoup.parse(html)
@@ -119,19 +122,23 @@ class LibGenClient(
 
         if (directUrl.contains("library.lol") || directUrl.contains("ads.php")) {
             try {
-                val req = Request.Builder().url(directUrl).header("User-Agent", "Mozilla/5.0").build()
-                val html = client.newCall(req).execute().use { it.body?.string() }
-                if (html != null) {
-                    val doc = Jsoup.parse(html)
-                    val getLink = doc.select("a:contains(GET), a:contains(Cloudflare), a:contains(IPFS)").firstOrNull()?.attr("href")
-                    if (!getLink.isNullOrBlank()) {
-                        directUrl = getLink
-                    }
-                }
+                intermediateDownloadUrl(directUrl)?.let { directUrl = it }
             } catch (_: Exception) {}
         }
 
         val resolvedBook = book.copy(downloadUrl = directUrl)
         downloader.download(resolvedBook, onProgress)
+    }
+
+    internal fun intermediateDownloadUrl(url: String): String? {
+        val request = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").build()
+        return requestExecutor.execute(request).use { response ->
+            if (!response.isSuccessful) return@use null
+            val body = response.body ?: return@use null
+            val html = body.byteStream().readBoundedText(TransferLimits.CATALOG_PAGE, body.contentLength())
+            val doc = Jsoup.parse(html, response.request.url.toString())
+            doc.select("a:contains(GET), a:contains(Cloudflare), a:contains(IPFS)").firstOrNull()
+                ?.absUrl("href")?.takeIf(String::isNotBlank)
+        }
     }
 }

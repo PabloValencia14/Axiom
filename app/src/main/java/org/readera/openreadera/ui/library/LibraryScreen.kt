@@ -1121,6 +1121,40 @@ fun LibraryScreen(
                             }
                         }
                     }
+                    AnimatedVisibility(
+                        visible = state.isScanning,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = if (state.scanCount > 0) {
+                                        "Buscando libros en el dispositivo... (${state.scanCount} encontrados)"
+                                    } else {
+                                        "Buscando libros y documentos en el almacenamiento..."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         ) { padding ->
@@ -1186,21 +1220,51 @@ fun LibraryScreen(
                     }
                     // Drilldown: Selected Format
                     state.selectedFormat != null -> {
-                        BookGridView(
-                            books = state.books,
-                            showBackTile = false,
-                            onBackTileClick = {},
-                            onOpenBookDetails = onOpenBookDetails,
-                            onOpenReader = onOpenReader,
-                            onToggleFavorite = { viewModel.toggleFavorite(it) },
-                            onToggleToRead = { viewModel.toggleToRead(it) },
-                            onToggleHaveRead = { viewModel.toggleHaveRead(it) },
-                            onOpenCollections = { bookForCollections = it },
-                            onMoveToTrash = handleMoveToTrash,
-                            onEdit = { bookForEditMetadata = it },
-                            onRemoveFromReadingNow = handleRemoveFromReadingNow,
-                            isCompact = isCompactMode
-                        )
+                        val selectedFormat = checkNotNull(state.selectedFormat)
+                        val isIndexedOnly = DocumentFormatCapabilities.isIndexedOnly(selectedFormat.format)
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (isIndexedOnly) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Info,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Text(
+                                            text = "Aviso de formato: Los archivos en ${selectedFormat.format} están indexados para organización en la biblioteca, pero Axiom no incluye motor de lectura en esta versión.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                            BookGridView(
+                                books = state.books,
+                                showBackTile = false,
+                                onBackTileClick = {},
+                                onOpenBookDetails = onOpenBookDetails,
+                                onOpenReader = onOpenReader,
+                                onToggleFavorite = { viewModel.toggleFavorite(it) },
+                                onToggleToRead = { viewModel.toggleToRead(it) },
+                                onToggleHaveRead = { viewModel.toggleHaveRead(it) },
+                                onOpenCollections = { bookForCollections = it },
+                                onMoveToTrash = handleMoveToTrash,
+                                onEdit = { bookForEditMetadata = it },
+                                onRemoveFromReadingNow = handleRemoveFromReadingNow,
+                                isCompact = isCompactMode
+                            )
+                        }
                     }
                     // Drilldown: Selected Folder
                     state.selectedFolder != null -> {
@@ -1230,7 +1294,11 @@ fun LibraryScreen(
                     // Series Section: 3-column compact cells
                     state.currentSection == LibrarySection.SERIES -> {
                         if (state.series.isEmpty()) {
-                            EmptyStateView(message = "Todas las series de libros y documentos encontrados en el dispositivo, estarán aquí.")
+                            EmptyStateView(
+                                icon = Icons.Outlined.AutoStories,
+                                title = "Sin series detectadas",
+                                message = "Las series de libros encontradas en el almacenamiento del dispositivo se agruparán automáticamente aquí."
+                            )
                         } else {
                             SeriesView(
                                 series = state.series,
@@ -1396,7 +1464,11 @@ fun LibraryScreen(
                     // Trash Section: Logical trash
                     state.currentSection == LibrarySection.TRASH -> {
                         if (state.trashBooks.isEmpty()) {
-                            EmptyStateView(message = "La Papelera está vacía. Los libros y documentos que puso en la Papelera, estarán aquí.")
+                            EmptyStateView(
+                                icon = Icons.Outlined.DeleteOutline,
+                                title = "La Papelera está vacía",
+                                message = "Los libros y documentos que envíes a la Papelera se conservarán aquí antes de su eliminación definitiva."
+                            )
                         } else {
                             TrashGridView(
                                 books = state.trashBooks,
@@ -1407,14 +1479,47 @@ fun LibraryScreen(
                     // Standard book list sections: Leyendo ahora, Libros y documentos, Favoritos, Para leer, Leídos
                     else -> {
                         if (state.books.isEmpty()) {
-                            val emptyMessage = when (state.currentSection) {
-                                LibrarySection.FAVORITES -> "Los libros y documentos que agregó a Favoritos estarán aquí."
-                                LibrarySection.TO_READ -> "Los libros y documentos que agregó a Para Leer estarán aquí."
-                                LibrarySection.HAVE_READ -> "Los libros y documentos que agregó a Leídos estarán aquí."
-                                LibrarySection.READING_NOW -> "Los libros y documentos que comenzó a leer estarán aquí."
-                                else -> "No se encontraron libros ni documentos."
+                            if (state.searchQuery.isNotBlank()) {
+                                EmptyStateView(
+                                    icon = Icons.Outlined.SearchOff,
+                                    title = "Sin resultados",
+                                    message = "No se encontraron libros ni documentos que coincidan con \"${state.searchQuery}\".",
+                                    actionLabel = "Limpiar búsqueda",
+                                    onAction = { viewModel.setSearchQuery("") }
+                                )
+                            } else {
+                                when (state.currentSection) {
+                                    LibrarySection.FAVORITES -> EmptyStateView(
+                                        icon = Icons.Outlined.Star,
+                                        title = "Sin favoritos aún",
+                                        message = "Los libros y documentos que marque con una estrella como Favoritos aparecerán aquí."
+                                    )
+                                    LibrarySection.TO_READ -> EmptyStateView(
+                                        icon = Icons.Outlined.BookmarkBorder,
+                                        title = "Lista de lectura vacía",
+                                        message = "Los libros y documentos que agregue a 'Para leer' estarán guardados aquí."
+                                    )
+                                    LibrarySection.HAVE_READ -> EmptyStateView(
+                                        icon = Icons.Outlined.CheckCircleOutline,
+                                        title = "Sin libros leídos",
+                                        message = "Los libros y documentos que marque como leídos aparecerán aquí con su registro."
+                                    )
+                                    LibrarySection.READING_NOW -> EmptyStateView(
+                                        icon = Icons.AutoMirrored.Filled.MenuBook,
+                                        title = "No estás leyendo ningún libro",
+                                        message = "Los libros y documentos que comience a leer aparecerán aquí para retomar su lectura rápidamente.",
+                                        actionLabel = "Ver todos los documentos",
+                                        onAction = { viewModel.setSection(LibrarySection.ALL_DOCUMENTS) }
+                                    )
+                                    else -> EmptyStateView(
+                                        icon = Icons.Outlined.FolderOpen,
+                                        title = "No se encontraron libros",
+                                        message = "No se encontraron documentos compatibles en el almacenamiento local. Puedes iniciar una búsqueda o importar archivos.",
+                                        actionLabel = "Examinar archivos",
+                                        onAction = { viewModel.triggerScan() }
+                                    )
+                                }
                             }
-                            EmptyStateView(message = emptyMessage)
                         } else {
                             BookGridView(
                                 books = state.books,
@@ -1602,7 +1707,9 @@ private fun DrawerNavEntry(
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
             unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
         ),
-        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+        modifier = Modifier
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .heightIn(min = 48.dp)
     )
 }
 
@@ -1622,15 +1729,25 @@ private fun BookGridView(
     onRemoveFromReadingNow: ((Book) -> Unit)? = null,
     isCompact: Boolean = false
 ) {
+    val configuration = LocalConfiguration.current
+    val screenWidth = configuration.screenWidthDp
+    val isTablet = screenWidth >= 600
+    val isWide = screenWidth >= 840
+
     val columns = if (isCompact) {
-        GridCells.Fixed(1)
+        if (isTablet) GridCells.Adaptive(minSize = 360.dp) else GridCells.Fixed(1)
     } else {
-        GridCells.Adaptive(minSize = 260.dp)
+        GridCells.Adaptive(minSize = if (screenWidth < 360) 240.dp else 275.dp)
+    }
+    val horizontalPadding = when {
+        isWide -> 24.dp
+        isTablet -> 16.dp
+        else -> 12.dp
     }
     val contentPadding = if (isCompact) {
-        PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+        PaddingValues(horizontal = horizontalPadding, vertical = 8.dp)
     } else {
-        PaddingValues(12.dp)
+        PaddingValues(horizontal = horizontalPadding, vertical = 12.dp)
     }
     val verticalSpacing = if (isCompact) 8.dp else 12.dp
 
@@ -1896,6 +2013,7 @@ private fun ReadEraBookCard(
         val mb = book.fileSize / (1024.0 * 1024.0)
         if (mb >= 1.0) "%.1f MB".format(mb) else "${book.fileSize / 1024} KB"
     }
+    val isReadable = DocumentFormatCapabilities.isReadable(book.format)
 
     if (isCompact) {
         // Modo Lista Compacta: fila horizontal densa, portada 44x64dp, sin desbordamientos
@@ -1980,11 +2098,23 @@ private fun ReadEraBookCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        Surface(
+                            color = if (isReadable) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(4.dp),
+                            border = if (!isReadable) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
+                        ) {
+                            Text(
+                                text = DocumentFormatCapabilities.badgeText(book.format),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isReadable) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
                         Text(
-                            text = "${book.format.uppercase()}, $formattedSize",
+                            text = formattedSize,
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         DocumentCategoryButton(book)
                     }
@@ -2038,7 +2168,7 @@ private fun ReadEraBookCard(
                             .height(coverHeight)
                             .clip(RoundedCornerShape(6.dp))
                             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                            .clickable { onOpenReader() },
+                        .clickable { onOpenReader() },
                         contentAlignment = Alignment.Center
                     ) {
                         if (!book.coverPath.isNullOrBlank() && File(book.coverPath).exists()) {
@@ -2095,12 +2225,38 @@ private fun ReadEraBookCard(
                         }
 
                         Column {
-                            Text(
-                                text = "${book.format.uppercase()}, $formattedSize",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    color = if (isReadable) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(4.dp),
+                                    border = if (!isReadable) BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null
+                                ) {
+                                    Text(
+                                        text = DocumentFormatCapabilities.badgeText(book.format),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isReadable) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Text(
+                                    text = formattedSize,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (!isReadable) {
+                                Text(
+                                    text = "Formato indexado",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
                             DocumentCategoryButton(book)
                             if (book.progressPercent > 0f) {
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -2147,10 +2303,8 @@ private fun AuthorsView(
     authors: List<AuthorItem>,
     onSelectAuthor: (AuthorItem) -> Unit
 ) {
-    val isPhone = LocalConfiguration.current.screenWidthDp < 600
     LazyVerticalGrid(
-        columns = if (isPhone) GridCells.Fixed(2) else GridCells.Fixed(3),
-        contentPadding = PaddingValues(16.dp),
+        columns = GridCells.Adaptive(minSize = 160.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
@@ -2188,10 +2342,8 @@ private fun SeriesView(
     series: List<SeriesItem>,
     onSelectSeries: (SeriesItem) -> Unit
 ) {
-    val isPhone = LocalConfiguration.current.screenWidthDp < 600
     LazyVerticalGrid(
-        columns = if (isPhone) GridCells.Fixed(2) else GridCells.Fixed(3),
-        contentPadding = PaddingValues(16.dp),
+        columns = GridCells.Adaptive(minSize = 160.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
@@ -2228,10 +2380,8 @@ private fun CollectionsView(
     onSelectCollection: (org.readera.openreadera.data.db.CollectionWithCount) -> Unit,
     onCreateNewCollection: () -> Unit
 ) {
-    val isPhone = LocalConfiguration.current.screenWidthDp < 600
     LazyVerticalGrid(
-        columns = if (isPhone) GridCells.Fixed(2) else GridCells.Fixed(3),
-        contentPadding = PaddingValues(16.dp),
+        columns = GridCells.Adaptive(minSize = 160.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
@@ -2299,44 +2449,90 @@ private fun FormatsView(
     onSelectFormat: (FormatItem) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
-        Text(
-            text = "Archivos de diferentes formatos encontrados en el dispositivo: $totalFiles",
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(16.dp)
-        )
-        val isPhone = LocalConfiguration.current.screenWidthDp < 600
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Formatos en la biblioteca",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Total de archivos detectados: $totalFiles. Los formatos con lector integrado se abren directamente; los formatos indexados se catalogan para organización en biblioteca.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
         LazyVerticalGrid(
-            columns = if (isPhone) GridCells.Fixed(2) else GridCells.Fixed(3),
+            columns = GridCells.Adaptive(minSize = 160.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize()
         ) {
             items(formats) { fmt ->
+                val isReadable = DocumentFormatCapabilities.isReadable(fmt.format)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
                         .clickable(enabled = fmt.bookCount > 0) { onSelectFormat(fmt) },
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RoundedCornerShape(10.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = if (fmt.bookCount > 0) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.surfaceContainerLowest
-                    )
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (fmt.bookCount > 0) 0.8f else 0.4f))
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .padding(14.dp)
                     ) {
-                        Text(
-                            text = if (fmt.bookCount > 0) "${fmt.format} — ${fmt.bookCount}" else fmt.format,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = if (fmt.bookCount > 0) FontWeight.Bold else FontWeight.Normal,
-                            color = if (fmt.bookCount > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = fmt.format,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = if (fmt.bookCount > 0) FontWeight.Bold else FontWeight.Normal,
+                                color = if (fmt.bookCount > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
+                            )
+                            Surface(
+                                shape = CircleShape,
+                                color = if (fmt.bookCount > 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh
+                            ) {
+                                Text(
+                                    text = "${fmt.bookCount}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (fmt.bookCount > 0) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = if (isReadable) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Text(
+                                text = if (isReadable) "Lector integrado" else "Solo indexado",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isReadable) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -2363,8 +2559,7 @@ private fun FoldersView(
             )
         }
         LazyVerticalGrid(
-            columns = if (isPhone) GridCells.Fixed(1) else GridCells.Fixed(3),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            columns = GridCells.Adaptive(minSize = 240.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize()
@@ -2483,8 +2678,7 @@ private fun TrashGridView(
     onRestore: (Long) -> Unit
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 260.dp),
-        contentPadding = PaddingValues(12.dp),
+        columns = GridCells.Adaptive(minSize = 270.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
@@ -2511,7 +2705,9 @@ private fun TrashGridView(
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = { onRestore(book.id) },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
                     ) {
                         Icon(Icons.Default.Restore, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
@@ -2524,20 +2720,65 @@ private fun TrashGridView(
 }
 
 @Composable
-private fun EmptyStateView(message: String) {
+private fun EmptyStateView(
+    icon: ImageVector = Icons.AutoMirrored.Filled.MenuBook,
+    title: String? = null,
+    message: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(horizontal = 24.dp, vertical = 32.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.widthIn(max = 500.dp)
-        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.widthIn(max = 440.dp)
+        ) {
+            Surface(
+                modifier = Modifier.size(64.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+            if (title != null) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    textAlign = TextAlign.Center
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            if (actionLabel != null && onAction != null) {
+                Spacer(modifier = Modifier.height(20.dp))
+                FilledTonalButton(
+                    onClick = onAction,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) {
+                    Text(actionLabel, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
     }
 }
 
@@ -2578,7 +2819,9 @@ private fun QuotesLibraryView(
 
     if (quotes.isEmpty()) {
         EmptyStateView(
-            message = "No hay citas ni notas guardadas todavía.\n\nAl leer cualquier libro o documento, pulsa el botón de citas o mantén pulsado el texto para guardar tus notas y reflexiones aquí."
+            icon = Icons.Outlined.FormatQuote,
+            title = "Sin citas ni notas aún",
+            message = "Al leer cualquier libro o documento, pulsa el botón de citas o mantén pulsado el texto para guardar tus reflexiones y fragmentos destacados aquí."
         )
     } else {
         Column(modifier = Modifier.fillMaxSize()) {

@@ -264,6 +264,9 @@ fun ReaderScreen(
         panOffset = Offset.Zero
         viewModel.setZoomScale(1.0f)
     }
+    LaunchedEffect(zoomScale) {
+        viewModel.setZoomScale(zoomScale)
+    }
 
     val applyZoom: (Float) -> Unit = { newScale ->
         val clamped = newScale.coerceIn(1.0f, 5.0f)
@@ -442,8 +445,12 @@ fun ReaderScreen(
         if (state.currentPageBitmap != null) viewModel.requestPageText(
             if (effectiveViewMode == ReaderViewMode.DOUBLE_PAGE && state.currentPage + 1 < state.totalPages)
                 setOf(state.currentPage, state.currentPage + 1) else setOf(state.currentPage))
+        else viewModel.requestPageText(emptySet())
     }
     val currentPageText = state.pageText[state.currentPage]
+    LaunchedEffect(state.error) {
+        state.error?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+    }
     val activePageText = state.pageText[state.activeInkPage] ?: currentPageText
     LaunchedEffect(viewModel, state.book?.id, state.currentPage, effectiveViewMode) {
         viewModel.setActiveInkPage(state.currentPage)
@@ -553,9 +560,17 @@ fun ReaderScreen(
                         }
                     }
             }
-            .pointerInput(viewportSize) {
+            .pointerInput(viewportSize, movementLocked) {
                 awaitEachGesture {
                     val firstDown = awaitFirstDown(requireUnconsumed = false)
+                    if (movementLocked) {
+                        // A locked pinch must not become a tap that hides chrome or turns a page.
+                        do {
+                            val event = awaitPointerEvent()
+                            if (event.changes.size > 1) event.changes.forEach { it.consume() }
+                        } while (event.changes.any { it.pressed })
+                        return@awaitEachGesture
+                    }
                     var includesNonTouch = firstDown.type != PointerType.Touch
                     var pastTouchSlop = false
                     var accumulatedPan = Offset.Zero
@@ -631,7 +646,7 @@ fun ReaderScreen(
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .verticalScroll(rememberScrollState()),
+                                    .verticalScroll(rememberScrollState(), enabled = !movementLocked),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Box(
@@ -1240,7 +1255,8 @@ fun ReaderScreen(
     if (showSettingsSheet) {
         ReadingSettingsSheet(
             settings = state.settings,
-            isPdf = isPdf,
+            isFixedLayout = isFixedDoc,
+            documentFormat = state.book?.format.orEmpty(),
             zoomScale = zoomScale,
             onZoomChange = { applyZoom(it) },
             onDismiss = { showSettingsSheet = false },
@@ -1254,7 +1270,7 @@ fun ReaderScreen(
             onToggleBionicReading = { viewModel.toggleBionicReading() },
             onOpenGeneralSettings = {
                 showSettingsSheet = false
-                // Opens general settings
+                onOpenAppSettings()
             }
         )
     }
@@ -1281,9 +1297,10 @@ fun ReaderScreen(
             searchResults = state.searchResults,
             isSearching = state.isSearching,
             onSearch = { viewModel.search(it) },
-            onDismiss = { showSearchSheet = false },
+            onDismiss = { viewModel.search(""); showSearchSheet = false },
             onNavigateToPage = { page ->
                 viewModel.goToPage(page)
+                viewModel.search("")
                 showSearchSheet = false
             }
         )

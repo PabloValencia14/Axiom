@@ -8,6 +8,8 @@ El OCR y la generación de capas de texto PDF usan Google ML Kit Text Recognitio
 
 La biblioteca, el progreso y las anotaciones se guardan en el dispositivo. Integraciones opcionales como Google Drive, catálogos en línea y servicios configurados por el usuario (por ejemplo OpenRouter) transmiten datos a esos proveedores cuando se activan; revisa sus políticas. No publiques libros, claves, bases de datos, capturas privadas ni datos personales en incidencias o pull requests.
 
+La traducción completa, cuando se solicita, envía texto nativo de las páginas a Google Translate; no hace OCR ni incluye páginas sin texto nativo. La importación y los adjuntos de Drive bloquean rutas o datos privados de la aplicación. La autorización de Drive está ligada a la cuenta; los tokens heredados sin cuenta asociada requieren volver a autorizar.
+
 ## Funciones y límites actuales
 
 - OCR orientado a texto latino; el reconocimiento puede no encontrar texto o cometer errores según calidad, resolución, idioma y diseño de página.
@@ -15,6 +17,12 @@ La biblioteca, el progreso y las anotaciones se guardan en el dispositivo. Integ
 - CBZ está implementado; CBR, DOC, RTF, DJV/DJVU y CHM no tienen motor de lectura en esta versión, aunque aparezcan como formatos reconocidos por la aplicación.
 - La firma PDF solo dibuja una marca visual en una copia; no incorpora certificado, identidad verificada ni validación criptográfica.
 - La sincronización y servicios remotos dependen de credenciales, red y disponibilidad de terceros; la copia local sigue siendo independiente.
+- El escaneo automático agrupa el inventario, conserva metadatos existentes, anotaciones y documentos en la papelera, y se limita a uno cada 30 segundos al reanudar la app; la actualización explícita sigue disponible de inmediato.
+- La búsqueda, los filtros y el ordenamiento de la biblioteca se calculan fuera del hilo principal; solo la coincidencia de texto usa un debounce de 250 ms.
+- El lector comparte una caché de imágenes de 32–128 MiB con una ventana móvil de páginas; el bloqueo de movimiento impide desplazar o ampliar con gestos sin desactivar la navegación por páginas.
+- La biblioteca adapta sus cuadrículas a la pantalla. El lector ofrece opciones de tema accesibles de 48 dp, acceso funcional a Ajustes generales y controles de página fija para CBZ (sin controles de reflujo EPUB). La lectura en voz alta informa si no hay texto y Detener cancela la preparación pendiente.
+- La traducción completa procesa todas las páginas con texto nativo (sin el antiguo tope de 200), omite las páginas sin texto, informa del envío a Google Translate y admite cancelación; los errores no producen traducciones incompletas y cada resultado usa una salida única.
+- Límites aplicados: documentos 256 MiB, cubiertas 8 MiB, snapshots 16 MiB y páginas de catálogo 4 MiB. EPUB: 2 MiB por miembro descomprimido, 16 MiB acumulados, 10.000 entradas ZIP/manifiesto y 2.000 referencias de spine.
 
 ## Requisitos
 

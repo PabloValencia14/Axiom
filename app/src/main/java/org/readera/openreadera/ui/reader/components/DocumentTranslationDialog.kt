@@ -27,6 +27,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -58,6 +62,7 @@ fun DocumentTranslationDialog(
     var isTranslatingPage by remember { mutableStateOf(false) }
     var translatedPageText by remember { mutableStateOf("") }
     var pageError by remember { mutableStateOf<String?>(null) }
+    var pageTranslationJob by remember { mutableStateOf<Job?>(null) }
 
     // Full book translation states
     var isTranslatingFull by remember { mutableStateOf(false) }
@@ -65,6 +70,14 @@ fun DocumentTranslationDialog(
     var fullStatusMessage by remember { mutableStateOf("") }
     var completedFile by remember { mutableStateOf<File?>(null) }
     var fullError by remember { mutableStateOf<String?>(null) }
+    var fullTranslationJob by remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(currentPage, targetLang) {
+        pageTranslationJob?.cancel()
+        pageTranslationJob = null
+        isTranslatingPage = false
+        translatedPageText = ""
+        pageError = null
+    }
 
     val langName = GoogleTranslateService.supportedLanguages.find { it.first == targetLang }?.second ?: "Español"
 
@@ -138,10 +151,10 @@ fun DocumentTranslationDialog(
 
                     Box {
                         AssistChip(
-                            onClick = { if (!isTranslatingFull) showLangMenu = true },
+                            onClick = { if (!isTranslatingFull && !isTranslatingPage) showLangMenu = true },
                             label = { Text(langName, fontWeight = FontWeight.SemiBold) },
                             trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null) },
-                            enabled = !isTranslatingFull
+                            enabled = !isTranslatingFull && !isTranslatingPage
                         )
 
                         DropdownMenu(
@@ -161,6 +174,11 @@ fun DocumentTranslationDialog(
                         }
                     }
                 }
+                Text(
+                    text = "Al traducir, el texto se envía a Google Translate. Se requiere conexión a Internet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -173,15 +191,15 @@ fun DocumentTranslationDialog(
                 ) {
                     Tab(
                         selected = selectedMode == 0,
-                        onClick = { if (!isTranslatingFull) selectedMode = 0 },
+                        onClick = { if (!isTranslatingFull && !isTranslatingPage) selectedMode = 0 },
                         text = { Text("Página actual (${currentPage + 1})", fontWeight = FontWeight.Medium) },
-                        enabled = !isTranslatingFull
+                        enabled = !isTranslatingFull && !isTranslatingPage
                     )
                     Tab(
                         selected = selectedMode == 1,
-                        onClick = { if (!isTranslatingFull) selectedMode = 1 },
+                        onClick = { if (!isTranslatingFull && !isTranslatingPage) selectedMode = 1 },
                         text = { Text("Documento / Paper completo", fontWeight = FontWeight.Medium) },
-                        enabled = !isTranslatingFull
+                        enabled = !isTranslatingFull && !isTranslatingPage
                     )
                 }
 
@@ -220,20 +238,21 @@ fun DocumentTranslationDialog(
                                         onClick = {
                                             isTranslatingPage = true
                                             pageError = null
-                                            scope.launch {
-                                                val text = getCurrentPageText()
-                                                if (text.isBlank()) {
-                                                    pageError = "No se detectó texto extraíble en esta página."
-                                                    isTranslatingPage = false
-                                                    return@launch
+                                            val language = targetLang
+                                            pageTranslationJob = scope.launch {
+                                                try {
+                                                    val text = getCurrentPageText()
+                                                    require(text.isNotBlank()) { "No se detectó texto extraíble en esta página." }
+                                                    val translated = GoogleTranslateService.translateText(text, language).getOrThrow()
+                                                    require(translated.isNotBlank()) { "El servicio no devolvió una traducción." }
+                                                    translatedPageText = translated
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Exception) {
+                                                    pageError = error.message ?: "No se pudo traducir esta página."
+                                                } finally {
+                                                    if (pageTranslationJob === currentCoroutineContext()[Job]) isTranslatingPage = false
                                                 }
-                                                val res = GoogleTranslateService.translateText(text, targetLang)
-                                                res.onSuccess {
-                                                    translatedPageText = it
-                                                }.onFailure {
-                                                    pageError = it.localizedMessage ?: "Error al traducir"
-                                                }
-                                                isTranslatingPage = false
                                             }
                                         }
                                     ) {
@@ -345,7 +364,7 @@ fun DocumentTranslationDialog(
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "Se traducirán las $totalPages páginas y se creará un archivo «[ES] $bookTitle.epub» listo para leer offline con índices y capítulos.",
+                                    text = "Se revisarán las $totalPages páginas y se creará una nueva copia EPUB en ${langName.lowercase()}. Solo se traduce el texto extraíble; las páginas sin texto se omiten.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
@@ -361,66 +380,43 @@ fun DocumentTranslationDialog(
                                         fullProgress = 0.01f
                                         fullStatusMessage = "Iniciando traducción..."
 
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                try {
-                                                    val chapters = mutableListOf<Pair<String, String>>()
-                                                    val pagesToProcess = minOf(totalPages, 200) // Cap to 200 pages for reasonable time
-
-                                                    for (p in 0 until pagesToProcess) {
-                                                        fullProgress = (p + 1).toFloat() / pagesToProcess.toFloat()
-                                                        fullStatusMessage = "Traduciendo página ${p + 1} de $pagesToProcess..."
-
-                                                        val rawText = getPageTextByIndex(p)
-                                                        if (rawText.isNotBlank()) {
-                                                            val res = GoogleTranslateService.translateText(rawText, targetLang)
-                                                            val transText = res.getOrDefault(rawText)
-                                                            chapters.add("Página ${p + 1}" to transText)
+                                        val language = targetLang
+                                        fullTranslationJob = scope.launch {
+                                            var output: File? = null
+                                            var published = false
+                                            try {
+                                                val generated = withContext(Dispatchers.IO) {
+                                                    val chapters = translateDocumentPages(
+                                                        totalPages, getPageTextByIndex,
+                                                        translate = { GoogleTranslateService.translateText(it, language) },
+                                                        onProgress = { page ->
+                                                            fullProgress = page.toFloat() / totalPages
+                                                            fullStatusMessage = "Traduciendo página $page de $totalPages..."
                                                         }
-
-                                                        // Slight delay between pages to be a polite consumer
-                                                        delay(120)
-                                                    }
-
-                                                    if (chapters.isEmpty()) {
-                                                        fullError = "No se pudo extraer texto legible del documento."
-                                                        isTranslatingFull = false
-                                                        return@withContext
-                                                    }
-
+                                                    )
                                                     fullStatusMessage = "Empaquetando libro en formato EPUB..."
                                                     val booksDir = StorageScanner.getAppBooksDirectory()
-
                                                     val safeTitle = bookTitle.replace(Regex("""[\\/:*?"<>|]"""), "_").take(40)
-                                                    val targetEpub = File(booksDir, "[${targetLang.uppercase()}] $safeTitle.epub")
-
-                                                    val createRes = EpubWriter.createEpub(
+                                                    val targetEpub = File.createTempFile("[${language.uppercase()}] $safeTitle-", ".epub", booksDir)
+                                                    output = targetEpub
+                                                    EpubWriter.createEpub(
                                                         outputFile = targetEpub,
-                                                        title = "[${targetLang.uppercase()}] $bookTitle",
+                                                        title = "[${language.uppercase()}] $bookTitle",
                                                         author = bookAuthor,
                                                         chapters = chapters,
-                                                        language = targetLang
-                                                    )
-
-                                                    createRes.onSuccess { f ->
-                                                        completedFile = f
-                                                        isTranslatingFull = false
-                                                        try {
-                                                            StorageScanner.scanSingleFile(context, f)
-                                                            val syncManager = org.readera.openreadera.sync.GoogleDriveSyncManager(context)
-                                                            if (syncManager.isDriveConnected() && syncManager.isAutoSyncEnabled) {
-                                                                syncManager.triggerImmediateBackgroundSync()
-                                                            }
-                                                        } catch (_: Exception) {}
-                                                        onBookGenerated(f)
-                                                    }.onFailure { e ->
-                                                        fullError = "Error al generar EPUB: ${e.localizedMessage}"
-                                                        isTranslatingFull = false
-                                                    }
-                                                } catch (e: Exception) {
-                                                    fullError = "Error durante el proceso: ${e.localizedMessage}"
-                                                    isTranslatingFull = false
+                                                        language = language
+                                                    ).getOrThrow()
                                                 }
+                                                completedFile = generated
+                                                published = true
+                                                onBookGenerated(generated)
+                                            } catch (cancelled: CancellationException) {
+                                                throw cancelled
+                                            } catch (error: Exception) {
+                                                fullError = error.message ?: "No se pudo generar el documento traducido."
+                                            } finally {
+                                                if (!published) output?.delete()
+                                                isTranslatingFull = false
                                             }
                                         }
                                     }
@@ -463,6 +459,13 @@ fun DocumentTranslationDialog(
                                         .height(6.dp)
                                         .clip(RoundedCornerShape(3.dp))
                                 )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedButton(onClick = {
+                                    fullTranslationJob?.cancel()
+                                    onDismiss()
+                                }) {
+                                    Text("Cancelar traducción")
+                                }
                             }
                         } else if (completedFile != null) {
                             Column(
@@ -493,7 +496,7 @@ fun DocumentTranslationDialog(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "Guardado en Descargas/OpenReadEra e indexado en la biblioteca.",
+                                    text = "Guardado en ${completedFile?.parentFile?.path.orEmpty()}.",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.outline
                                 )
@@ -525,4 +528,30 @@ fun DocumentTranslationDialog(
             }
         }
     }
+}
+
+/** Native text only: blank pages are skipped; a failed translation never becomes source-language output. */
+internal suspend fun translateDocumentPages(
+    totalPages: Int,
+    getPageText: (Int) -> String,
+    translate: suspend (String) -> Result<String>,
+    onProgress: (Int) -> Unit
+): List<Pair<String, String>> {
+    val chapters = mutableListOf<Pair<String, String>>()
+    for (page in 0 until totalPages) {
+        currentCoroutineContext().ensureActive()
+        onProgress(page + 1)
+        val source = getPageText(page)
+        if (source.isBlank()) continue
+        val translated = translate(source).getOrElse { failure ->
+            if (failure is CancellationException) throw failure
+            throw IllegalStateException("No se pudo traducir la página ${page + 1}. No se ha generado una copia incompleta.", failure)
+        }
+        currentCoroutineContext().ensureActive()
+        require(translated.isNotBlank()) { "La traducción de la página ${page + 1} está vacía." }
+        chapters.add("Página ${page + 1}" to translated)
+        delay(120)
+    }
+    require(chapters.isNotEmpty()) { "No se pudo extraer texto legible del documento." }
+    return chapters
 }

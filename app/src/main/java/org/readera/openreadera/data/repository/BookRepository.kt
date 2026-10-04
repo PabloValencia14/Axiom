@@ -1,6 +1,7 @@
 package org.readera.openreadera.data.repository
 
 import kotlinx.coroutines.flow.Flow
+import java.io.File
 import kotlinx.coroutines.sync.Mutex
 import org.readera.openreadera.data.db.*
 import org.readera.openreadera.data.model.*
@@ -21,6 +22,7 @@ class BookRepository(
     // Books
     fun getAllBooks(): Flow<List<Book>> = bookDao.getAllBooks()
     suspend fun getAllBooksList(): List<Book> = bookDao.getAllBooksList()
+    suspend fun getAllBooksIncludingTrashList(): List<Book> = bookDao.getAllBooksIncludingTrashList()
     fun getReadingNow(): Flow<List<Book>> = bookDao.getReadingNow()
     fun getFavorites(): Flow<List<Book>> = bookDao.getFavorites()
     fun getToRead(): Flow<List<Book>> = bookDao.getToRead()
@@ -36,6 +38,7 @@ class BookRepository(
     suspend fun updateBook(book: Book) = bookDao.update(book)
     suspend fun updateCoverAndMetadata(book: Book) = bookDao.updateCoverAndMetadata(
         id = book.id,
+        fileTitle = File(book.filePath).nameWithoutExtension.replace('_', ' ').trim(),
         title = book.title,
         author = book.author,
         coverPath = book.coverPath,
@@ -55,7 +58,6 @@ class BookRepository(
     suspend fun clearReadingNow() = bookDao.clearReadingNow()
     suspend fun removeFromReadingNow(id: Long) = bookDao.removeFromReadingNow(id)
     suspend fun markAsReading(id: Long) = bookDao.markAsReading(id)
-    suspend fun restoreTresCuerpos() = bookDao.restoreTresCuerpos()
     suspend fun clearFavorites() = bookDao.clearFavorites()
     suspend fun clearToRead() = bookDao.clearToRead()
     suspend fun clearHaveRead() = bookDao.clearHaveRead()

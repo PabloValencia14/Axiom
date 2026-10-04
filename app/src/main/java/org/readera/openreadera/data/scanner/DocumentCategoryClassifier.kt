@@ -99,6 +99,10 @@ class DocumentCategoryClassifier(context: Context) {
             manualDecision(context.getSharedPreferences(CACHE_PREFS, Context.MODE_PRIVATE), book)?.category
 
         suspend fun setManualCategory(context: Context, book: Book, category: DocumentCategory?) = withContext(Dispatchers.IO) {
+            setManualCategoryBlocking(context, book, category)
+        }
+
+        internal fun setManualCategoryBlocking(context: Context, book: Book, category: DocumentCategory?) {
             val prefs = context.getSharedPreferences(CACHE_PREFS, Context.MODE_PRIVATE)
             check(prefs.edit().putString("manual_${cacheKey(book.filePath)}", category?.name).commit()) {
                 "No se pudo guardar la categoría"

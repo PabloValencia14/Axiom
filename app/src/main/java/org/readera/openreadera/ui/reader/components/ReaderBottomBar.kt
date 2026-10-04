@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -20,6 +22,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import org.readera.openreadera.data.model.ReaderColorTheme
 import org.readera.openreadera.ui.theme.NightBackground
 import org.readera.openreadera.ui.theme.OledBackground
@@ -211,10 +217,13 @@ fun ReaderBottomBar(
                     }
 
                     if (isPdf) {
-                        IconButton(onClick = onToggleMovementLock) {
+                        IconButton(onClick = onToggleMovementLock,
+                            modifier = Modifier.semantics {
+                                stateDescription = if (movementLocked) "Movimiento bloqueado" else "Movimiento desbloqueado"
+                            }) {
                             Icon(
                                 imageVector = if (movementLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                                contentDescription = "Bloquear movimiento",
+                                contentDescription = if (movementLocked) "Desbloquear movimiento" else "Bloquear movimiento",
                                 tint = if (movementLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -229,66 +238,7 @@ fun ReaderBottomBar(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (currentTheme == ReaderColorTheme.SYSTEM)
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                )
-                                .border(
-                                    width = if (currentTheme == ReaderColorTheme.SYSTEM) 2.dp else 1.dp,
-                                    color = if (currentTheme == ReaderColorTheme.SYSTEM)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.outlineVariant,
-                                    shape = CircleShape
-                                )
-                                .clickable { onThemeChange(ReaderColorTheme.SYSTEM) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.BrightnessAuto,
-                                contentDescription = "Sistema (Sincronizado)",
-                                modifier = Modifier.size(16.dp),
-                                tint = if (currentTheme == ReaderColorTheme.SYSTEM)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        ThemeCircle(
-                            color = Color(0xFFFFFFFF),
-                            borderColor = Color(0xFFCCCCCC),
-                            isSelected = currentTheme == ReaderColorTheme.DAY,
-                            onClick = { onThemeChange(ReaderColorTheme.DAY) }
-                        )
-                        ThemeCircle(
-                            color = SepiaBackground,
-                            borderColor = Color(0xFFBCAAA4),
-                            isSelected = currentTheme == ReaderColorTheme.SEPIA,
-                            onClick = { onThemeChange(ReaderColorTheme.SEPIA) }
-                        )
-                        ThemeCircle(
-                            color = NightBackground,
-                            borderColor = Color(0xFF555555),
-                            isSelected = currentTheme == ReaderColorTheme.NIGHT,
-                            onClick = { onThemeChange(ReaderColorTheme.NIGHT) }
-                        )
-                        ThemeCircle(
-                            color = OledBackground,
-                            borderColor = if (currentTheme == ReaderColorTheme.OLED) Color.White else Color(0xFF444444),
-                            isSelected = currentTheme == ReaderColorTheme.OLED,
-                            onClick = { onThemeChange(ReaderColorTheme.OLED) }
-                        )
-                    }
+                    ReaderThemeChoices(currentTheme, onThemeChange)
                 }
             } else {
                 // Tablet / Desktop: Single Row
@@ -316,75 +266,19 @@ fun ReaderBottomBar(
                     }
 
                     if (isPdf) {
-                        IconButton(onClick = onToggleMovementLock) {
+                        IconButton(onClick = onToggleMovementLock,
+                            modifier = Modifier.semantics {
+                                stateDescription = if (movementLocked) "Movimiento bloqueado" else "Movimiento desbloqueado"
+                            }) {
                             Icon(
                                 imageVector = if (movementLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                                contentDescription = "Bloquear movimiento",
+                                contentDescription = if (movementLocked) "Desbloquear movimiento" else "Bloquear movimiento",
                                 tint = if (movementLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
 
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (currentTheme == ReaderColorTheme.SYSTEM)
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                )
-                                .border(
-                                    width = if (currentTheme == ReaderColorTheme.SYSTEM) 2.dp else 1.dp,
-                                    color = if (currentTheme == ReaderColorTheme.SYSTEM)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.outlineVariant,
-                                    shape = CircleShape
-                                )
-                                .clickable { onThemeChange(ReaderColorTheme.SYSTEM) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.BrightnessAuto,
-                                contentDescription = "Sistema (Sincronizado)",
-                                modifier = Modifier.size(16.dp),
-                                tint = if (currentTheme == ReaderColorTheme.SYSTEM)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        ThemeCircle(
-                            color = Color(0xFFFFFFFF),
-                            borderColor = Color(0xFFCCCCCC),
-                            isSelected = currentTheme == ReaderColorTheme.DAY,
-                            onClick = { onThemeChange(ReaderColorTheme.DAY) }
-                        )
-                        ThemeCircle(
-                            color = SepiaBackground,
-                            borderColor = Color(0xFFBCAAA4),
-                            isSelected = currentTheme == ReaderColorTheme.SEPIA,
-                            onClick = { onThemeChange(ReaderColorTheme.SEPIA) }
-                        )
-                        ThemeCircle(
-                            color = NightBackground,
-                            borderColor = Color(0xFF555555),
-                            isSelected = currentTheme == ReaderColorTheme.NIGHT,
-                            onClick = { onThemeChange(ReaderColorTheme.NIGHT) }
-                        )
-                        ThemeCircle(
-                            color = OledBackground,
-                            borderColor = if (currentTheme == ReaderColorTheme.OLED) Color.White else Color(0xFF444444),
-                            isSelected = currentTheme == ReaderColorTheme.OLED,
-                            onClick = { onThemeChange(ReaderColorTheme.OLED) }
-                        )
-                    }
+                    ReaderThemeChoices(currentTheme, onThemeChange)
                 }
             }
         }
@@ -429,22 +323,55 @@ fun ReaderBottomBar(
 }
 
 @Composable
-fun ThemeCircle(
-    color: Color,
-    borderColor: Color,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clip(CircleShape)
-            .background(color)
-            .border(
-                width = if (isSelected) 3.dp else 1.dp,
-                color = if (isSelected) MaterialTheme.colorScheme.primary else borderColor,
-                shape = CircleShape
-            )
-            .clickable(onClick = onClick)
-    )
+internal fun ReaderThemeChoices(currentTheme: ReaderColorTheme, onThemeChange: (ReaderColorTheme) -> Unit) {
+    Row(
+        modifier = Modifier.selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        for (theme in ReaderColorTheme.entries) {
+            val selected = currentTheme == theme
+            val label = when (theme) {
+                ReaderColorTheme.SYSTEM -> "Tema del sistema"
+                ReaderColorTheme.DAY -> "Tema claro"
+                ReaderColorTheme.SEPIA -> "Tema sepia"
+                ReaderColorTheme.NIGHT -> "Tema nocturno"
+                ReaderColorTheme.OLED -> "Tema OLED"
+            }
+            val color = when (theme) {
+                ReaderColorTheme.SYSTEM -> MaterialTheme.colorScheme.surfaceVariant
+                ReaderColorTheme.DAY -> Color.White
+                ReaderColorTheme.SEPIA -> SepiaBackground
+                ReaderColorTheme.NIGHT -> NightBackground
+                ReaderColorTheme.OLED -> OledBackground
+            }
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .selectable(selected = selected, role = Role.RadioButton, onClick = { onThemeChange(theme) })
+                    .semantics { contentDescription = label },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .border(if (selected) 3.dp else 1.dp,
+                            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                            CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (theme == ReaderColorTheme.SYSTEM) {
+                        Icon(Icons.Default.BrightnessAuto, contentDescription = null, modifier = Modifier.size(18.dp))
+                    } else if (selected) {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp),
+                            tint = if (theme == ReaderColorTheme.DAY || theme == ReaderColorTheme.SEPIA)
+                                Color.Black else Color.White)
+                    }
+                }
+            }
+        }
+    }
 }

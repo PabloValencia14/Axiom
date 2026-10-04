@@ -30,6 +30,14 @@ import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
+import androidx.room.withTransaction
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import org.readera.openreadera.core.io.TransferLimits
+import org.readera.openreadera.core.io.readBoundedText
+import org.readera.openreadera.data.importer.DocumentLocationPolicy
 
 data class DriveSyncStats(
     val booksSynced: Int,
@@ -67,6 +75,10 @@ class GoogleDriveSyncManager(
     val authManager = GoogleAuthManager(context)
     private val prefs: SharedPreferences =
         context.getSharedPreferences("drive_sync_data", Context.MODE_PRIVATE)
+    private var activeSession: DriveAccountGuard.Session? = null
+
+    private fun execute(request: Request): Response =
+        checkNotNull(activeSession) { "No active Drive identity" }.execute(client, request)
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -84,18 +96,25 @@ class GoogleDriveSyncManager(
     // Folder selection
     fun getTargetFolderName(): String = prefs.getString("target_folder_name", "OpenReadEra") ?: "OpenReadEra"
 
-    fun setTargetFolderName(name: String) {
+    fun setTargetFolderName(name: String) = DriveAccountGuard.updateIdentity {
         val clean = name.trim().ifBlank { "OpenReadEra" }
-        prefs.edit()
-            .putString("target_folder_name", clean)
-            .remove("target_folder_id") // Clear cached id when name changes
-            .apply()
+        prefs.edit().putString("target_folder_name", clean)
+            .remove("target_folder_id").remove("target_folder_account").apply()
     }
 
-    fun getTargetFolderId(): String? = prefs.getString("target_folder_id", null)
+    fun getTargetFolderId(): String? = DriveAccountGuard.locked {
+        val account = authManager.getSelectedProfile()?.email ?: return@locked null
+        prefs.getString("target_folder_id", null).takeIf {
+            prefs.getString("target_folder_account", null) == account
+        }
+    }
 
     fun setTargetFolderId(id: String) {
-        prefs.edit().putString("target_folder_id", id).apply()
+        val session = checkNotNull(activeSession) { "No active Drive identity" }
+        session.commit {
+            prefs.edit().putString("target_folder_id", id)
+                .putString("target_folder_account", authManager.getSelectedProfile()?.email).apply()
+        }
     }
 
     fun getAvailableFolderPresets(): List<String> = listOf(
@@ -118,17 +137,19 @@ class GoogleDriveSyncManager(
 
     fun getSafFolderName(): String? = prefs.getString("saf_folder_name", null)
 
-    fun saveSafFolder(uri: Uri, displayName: String) {
+    fun saveSafFolder(uri: Uri, displayName: String) = DriveAccountGuard.updateIdentity {
         val cleanName = displayName.trim().ifBlank { "Google Drive" }
-        prefs.edit()
-            .putString("saf_folder_uri", uri.toString())
-            .putString("saf_folder_name", cleanName)
+        prefs.edit().putString("saf_folder_uri", uri.toString()).putString("saf_folder_name", cleanName)
             .putString("target_folder_name", cleanName)
-            .apply()
+            .remove("target_folder_id").remove("target_folder_account").apply()
     }
 
     fun disconnectSafFolder() {
-        val currentUri = getSafFolderUri()
+        val currentUri = DriveAccountGuard.updateIdentity {
+            val uri = getSafFolderUri()
+            prefs.edit().remove("saf_folder_uri").remove("saf_folder_name").apply()
+            uri
+        }
         if (currentUri != null) {
             try {
                 val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -136,10 +157,6 @@ class GoogleDriveSyncManager(
                 context.contentResolver.releasePersistableUriPermission(currentUri, flags)
             } catch (_: Exception) {}
         }
-        prefs.edit()
-            .remove("saf_folder_uri")
-            .remove("saf_folder_name")
-            .apply()
     }
 
     fun isDriveConnected(): Boolean {
@@ -150,7 +167,14 @@ class GoogleDriveSyncManager(
     suspend fun performSync(): Result<DriveSyncStats> = processSyncMutex.withLock {
         withContext(Dispatchers.IO) {
             try {
-                val profile = authManager.getUserProfile()
+                authManager.getUserProfile()
+                val (session, profile) = DriveAccountGuard.locked {
+                    val selected = authManager.getSelectedProfile()
+                    DriveAccountGuard.capture() to selected
+                }
+                val job = checkNotNull(currentCoroutineContext()[Job])
+                session.attach(job)
+                activeSession = session
                 var token = profile?.accessToken
                 if (profile != null && (token.isNullOrBlank() || !token.startsWith("ya29"))) {
                     authManager.fetchOAuthToken(profile.email).getOrNull()?.let { token = it }
@@ -166,14 +190,17 @@ class GoogleDriveSyncManager(
                         safTreeUri = getSafFolderUri(),
                         oauthToken = token,
                         targetFolderName = getTargetFolderName(),
-                        client = client
-                    ) { folderName ->
-                        val activeToken = token?.takeIf { it.startsWith("ya29") }
-                            ?: error("No hay una sesión OAuth de Drive activa")
-                        getOrCreateDriveFolder(activeToken, folderName)
-                    }
+                        client = client,
+                        session = session,
+                        resolveFolderId = { folderName ->
+                            val activeToken = token?.takeIf { it.startsWith("ya29") }
+                                ?: error("No hay una sesión OAuth de Drive activa")
+                            getOrCreateDriveFolder(activeToken, folderName)
+                        }
+                    ),
+                    session
                 )
-                val transfer = DriveSyncStateTransfer(db, pipeline)
+                val transfer = DriveSyncStateTransfer(db, pipeline, DocumentLocationPolicy.forContext(context))
 
                 val (mergeStats, synchronizedStrokes) = DrawingStrokeSyncGate.mutex.withLock {
                     val localDrawingTombstones = collectLocalDrawingTombstones()
@@ -181,28 +208,33 @@ class GoogleDriveSyncManager(
                     val stats = if (hydratedRemote == null) {
                         MergeStats(drawingTombstones = localDrawingTombstones)
                     } else {
-                        mergeRemoteState(hydratedRemote.toString(), localDrawingTombstones)
+                        session.transaction {
+                            db.withTransaction {
+                                session.checkCurrent()
+                                mergeRemoteState(hydratedRemote.toString(), localDrawingTombstones).also {
+                                    currentCoroutineContext().ensureActive()
+                                    session.checkCurrent()
+                                }
+                            }
+                        }
                     }
                     stats to db.drawingStrokeDao().getAllStrokesList()
                 }
 
-                remoteRoot?.optJSONObject("readerPreferences")?.let {
-                    DriveSyncSafeState.applyReaderPreferences(context, it)
+                session.checkCurrent()
+                val safeSettings = session.commit {
+                    remoteRoot?.optJSONObject("readerPreferences")?.let {
+                        DriveSyncSafeState.applyReaderPreferences(context, it)
+                    }
+                    val readingStats = DriveSyncSafeState.mergeAndApplyReadingStats(context, remoteRoot?.optJSONObject("readingStats"))
+                    DriveSyncSafeState.mergeAndApplySyncPreferences(context, remoteRoot?.optJSONObject("syncPreferences"))
+                    val opdsCatalogs = DriveSyncSafeState.mergeAndApplyOpdsCatalogs(context, remoteRoot?.optJSONArray("opdsCatalogs"))
+                    val zLibraryPreferences = DriveSyncSafeState.mergeAndApplyZLibraryPreferences(context, remoteRoot?.optJSONObject("zLibraryPreferences"))
+                    Triple(readingStats, opdsCatalogs, zLibraryPreferences)
                 }
-                val readingStats = DriveSyncSafeState.mergeAndApplyReadingStats(
-                    context, remoteRoot?.optJSONObject("readingStats")
-                )
-                DriveSyncSafeState.mergeAndApplySyncPreferences(
-                    context, remoteRoot?.optJSONObject("syncPreferences")
-                )
-                val opdsCatalogs = DriveSyncSafeState.mergeAndApplyOpdsCatalogs(
-                    context, remoteRoot?.optJSONArray("opdsCatalogs")
-                )
-                val zLibraryPreferences = DriveSyncSafeState.mergeAndApplyZLibraryPreferences(
-                    context, remoteRoot?.optJSONObject("zLibraryPreferences")
-                )
+                val (readingStats, opdsCatalogs, zLibraryPreferences) = safeSettings
                 val manualCategoryOverrides = DriveSyncSafeState.mergeAndApplyManualCategoryOverrides(
-                    context, db, remoteRoot?.optJSONArray("manualCategoryOverrides")
+                    context, db, remoteRoot?.optJSONArray("manualCategoryOverrides"), session
                 )
 
                 val books = db.bookDao().getAllBooksIncludingTrashList()
@@ -231,8 +263,10 @@ class GoogleDriveSyncManager(
 
                 // Publish JSON only after all referenced blobs have been written and verified.
                 writeRemoteState(token, jsonString)
-                File(context.filesDir, STATE_FILE_NAME).writeText(jsonString)
-                prefs.edit().putLong("last_sync_timestamp", now).apply()
+                session.commit {
+                    File(context.filesDir, STATE_FILE_NAME).writeText(jsonString)
+                    prefs.edit().putLong("last_sync_timestamp", now).apply()
+                }
 
                 Result.success(
                     DriveSyncStats(
@@ -245,8 +279,13 @@ class GoogleDriveSyncManager(
                         mergedCollections = mergeStats.collectionsAdded
                     )
                 )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 Result.failure(e)
+            } finally {
+                currentCoroutineContext()[Job]?.let { activeSession?.detach(it) }
+                activeSession = null
             }
         }
     }
@@ -259,7 +298,7 @@ class GoogleDriveSyncManager(
             val stateFile = folder.findFile(STATE_FILE_NAME) ?: return null
             val input = context.contentResolver.openInputStream(stateFile.uri)
                 ?: throw IllegalStateException("No se pudo leer el estado de sincronización")
-            return input.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            return input.readBoundedText(TransferLimits.SNAPSHOT, stateFile.length())
         }
 
         if (token.isNullOrBlank() || !token.startsWith("ya29")) return null
@@ -270,16 +309,18 @@ class GoogleDriveSyncManager(
             .header("Authorization", "Bearer $token")
             .get()
             .build()
-        client.newCall(request).execute().use { response ->
+        execute(request).use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException("Error leyendo estado de Drive (${response.code})")
             }
-            return response.body?.string()
+            return response.body?.let { it.byteStream().readBoundedText(TransferLimits.SNAPSHOT, it.contentLength()) }
                 ?: throw IllegalStateException("Drive devolvió un estado vacío")
         }
     }
 
-    private fun writeRemoteState(token: String?, content: String) {
+    private suspend fun writeRemoteState(token: String?, content: String) {
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        require(bytes.size.toLong() <= TransferLimits.SNAPSHOT) { "Snapshot too large" }
         val safUri = getSafFolderUri()
         if (safUri != null) {
             val folder = DocumentFile.fromTreeUri(context, safUri)
@@ -291,19 +332,25 @@ class GoogleDriveSyncManager(
             // Write the complete document first. A process death must not
             // leave the shared JSON truncated halfway through a sync.
             val tempName = "$STATE_FILE_NAME.tmp-${System.nanoTime()}"
-            val temp = folder.createFile("application/json", tempName)
-                ?: throw IllegalStateException("No se pudo crear el temporal de sincronización")
+            val temp = checkNotNull(activeSession).commit {
+                folder.createFile("application/json", tempName)
+                    ?: throw IllegalStateException("No se pudo crear el temporal de sincronización")
+            }
             try {
                 val output = context.contentResolver.openOutputStream(temp.uri)
                     ?: throw IllegalStateException("No se pudo abrir el temporal de sincronización")
-                output.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+                val session = checkNotNull(activeSession)
+                val job = currentCoroutineContext()[Job]
+                output.use { out -> session.withOutput(out, job) { it.write(bytes) } }
 
-                val previous = folder.findFile(STATE_FILE_NAME)
-                if (previous != null && !previous.delete()) {
-                    throw IllegalStateException("No se pudo sustituir el estado anterior de sincronización")
-                }
-                if (!temp.renameTo(STATE_FILE_NAME)) {
-                    throw IllegalStateException("No se pudo finalizar el estado de sincronización")
+                checkNotNull(activeSession).commit {
+                    val previous = folder.findFile(STATE_FILE_NAME)
+                    if (previous != null && !previous.delete()) {
+                        throw IllegalStateException("No se pudo sustituir el estado anterior de sincronización")
+                    }
+                    if (!temp.renameTo(STATE_FILE_NAME)) {
+                        throw IllegalStateException("No se pudo finalizar el estado de sincronización")
+                    }
                 }
             } catch (error: Exception) {
                 temp.delete()
@@ -313,7 +360,7 @@ class GoogleDriveSyncManager(
         }
 
         if (!token.isNullOrBlank() && token.startsWith("ya29")) {
-            uploadAppDataToDrive(token, content)
+            uploadAppDataToDrive(token, bytes)
             return
         }
         throw IllegalStateException("No hay un destino de sincronización conectado")
@@ -333,7 +380,7 @@ class GoogleDriveSyncManager(
             .header("Authorization", "Bearer $token")
             .get()
             .build()
-        client.newCall(request).execute().use { response ->
+        execute(request).use { response ->
             if (!response.isSuccessful) {
                 val detail = response.body?.string().orEmpty()
                 throw IllegalStateException("Error consultando estado de Drive (${response.code}): $detail")
@@ -561,7 +608,7 @@ class GoogleDriveSyncManager(
         val cacheFile = File(context.filesDir, "openreadera_sync_state.json")
         if (!cacheFile.isFile) return emptySet()
 
-        val previousState = JSONObject(cacheFile.readText())
+        val previousState = JSONObject(cacheFile.inputStream().readBoundedText(TransferLimits.SNAPSHOT, cacheFile.length()))
         val tombstones = parseDrawingTombstones(previousState.optJSONArray("drawingStrokeTombstones"))
         val previousBookKeys = mutableMapOf<Long, String>()
         previousState.optJSONArray("books")?.let { books ->
@@ -724,22 +771,20 @@ class GoogleDriveSyncManager(
     private fun parseStatus(value: String, fallback: BookStatus = BookStatus.UNREAD): BookStatus =
         runCatching { BookStatus.valueOf(value) }.getOrDefault(fallback)
 
-    private fun uploadAppDataToDrive(token: String, content: String) {
+    private fun uploadAppDataToDrive(token: String, content: ByteArray) {
         val boundary = "-------OpenReadEraBoundary"
         val existingId = findRemoteStateFile(token)
         val metadata = JSONObject().apply {
             put("name", STATE_FILE_NAME)
             if (existingId == null) put("parents", JSONArray().put("appDataFolder"))
         }.toString()
-        val multipartBody = StringBuilder()
-            .append("--").append(boundary).append("\r\n")
-            .append("Content-Type: application/json; charset=UTF-8\r\n\r\n")
-            .append(metadata).append("\r\n")
-            .append("--").append(boundary).append("\r\n")
-            .append("Content-Type: application/json\r\n\r\n")
-            .append(content).append("\r\n")
-            .append("--").append(boundary).append("--")
-            .toString()
+        val multipartBody = MultipartBody.Builder(boundary)
+            .setType("multipart/related".toMediaType())
+            .addPart(Headers.headersOf("Content-Type", "application/json; charset=UTF-8"),
+                metadata.toRequestBody("application/json".toMediaType()))
+            .addPart(Headers.headersOf("Content-Type", "application/json"),
+                content.toRequestBody("application/json".toMediaType()))
+            .build()
 
         val req = Request.Builder()
             .url(
@@ -751,10 +796,10 @@ class GoogleDriveSyncManager(
             )
             .header("Authorization", "Bearer $token")
             .header("Content-Type", "multipart/related; boundary=$boundary")
-            .post(multipartBody.toRequestBody("multipart/related; boundary=$boundary".toMediaType()))
+            .post(multipartBody)
             .build()
 
-        client.newCall(req).execute().use { response ->
+        execute(req).use { response ->
             if (!response.isSuccessful) {
                 val detail = response.body?.string().orEmpty()
                 throw IllegalStateException("Error de Drive (${response.code}): $detail")
@@ -763,6 +808,9 @@ class GoogleDriveSyncManager(
     }
 
     suspend fun getOrCreateDriveFolder(token: String, folderName: String): String = withContext(Dispatchers.IO) {
+        val session = checkNotNull(activeSession) { "No active Drive identity" }
+        session.checkCurrent()
+        require(authManager.getUserProfile()?.accessToken == token) { "OAuth account changed" }
         val cachedId = getTargetFolderId()
         if (!cachedId.isNullOrBlank() && !cachedId.startsWith("folder_")) {
             return@withContext cachedId
@@ -784,7 +832,7 @@ class GoogleDriveSyncManager(
                 .get()
                 .build()
 
-            client.newCall(searchReq).execute().use { resp ->
+            execute(searchReq).use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -810,7 +858,7 @@ class GoogleDriveSyncManager(
                 .post(createJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
-            client.newCall(createReq).execute().use { resp ->
+            execute(createReq).use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -819,6 +867,8 @@ class GoogleDriveSyncManager(
                     return@withContext folderId
                 }
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             e.printStackTrace()
         }

@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
         if (hasStoragePermission()) {
             val app = applicationContext as OpenReadEraApplication
             lifecycleScope.launch {
-                app.storageScanner.scanStorage()
+                app.storageScanner.scanStorage(force = false)
             }
         }
     }

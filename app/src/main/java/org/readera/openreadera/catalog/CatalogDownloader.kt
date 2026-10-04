@@ -10,20 +10,22 @@ import okhttp3.Request
 import org.readera.openreadera.OpenReadEraApplication
 import org.readera.openreadera.data.scanner.StorageScanner
 import java.io.File
-import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
+import org.readera.openreadera.core.io.TransferLimits
+import org.readera.openreadera.core.io.copyBounded
 
 private val FICTION_BOOK_ROOT = Regex("""<(?:[\w.-]+:)?fictionbook\b""", RegexOption.IGNORE_CASE)
 
-class CatalogDownloader(private val context: Context) {
-
-    private val client = OkHttpClient.Builder()
+class CatalogDownloader(
+    private val context: Context,
+    private val client: OkHttpClient = OkHttpClient.Builder()
         .dns(BypassDns.instance)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(false)
         .followSslRedirects(false)
         .build()
+) {
     private val requestExecutor = CatalogRequestExecutor(client)
 
     suspend fun download(
@@ -78,19 +80,12 @@ class CatalogDownloader(private val context: Context) {
                 }
 
                 val length = body.contentLength()
+                TransferLimits.checkAdvertised(length, TransferLimits.DOCUMENT)
                 tempFile.outputStream().use { fos ->
                     body.byteStream().use { ins ->
-                        val buffer = ByteArray(16384)
-                        var n: Int
-                        while (ins.read(buffer).also { n = it } != -1) {
-                            fos.write(buffer, 0, n)
-                            totalBytes += n
-                            if (length > 0) {
-                                val p = (totalBytes.toFloat() / length.toFloat()).coerceIn(0f, 1f)
-                                onProgress(p)
-                            }
+                        totalBytes = copyBounded(ins, fos, TransferLimits.DOCUMENT) { copied ->
+                            if (length > 0) onProgress((copied.toFloat() / length).coerceIn(0f, 1f))
                         }
-                        fos.flush()
                     }
                 }
                 onProgress(1f)
@@ -165,26 +160,13 @@ class CatalogDownloader(private val context: Context) {
                     val coverFileName = if (!scanned.sha1.isNullOrBlank()) "cover_${scanned.sha1}.jpg" else "cover_${scanned.id}.jpg"
                     val coverFile = File(coversDir, coverFileName)
 
-                    val coverReq = Request.Builder()
-                        .url(CatalogUrlSecurity.checkedUrl(book.coverUrl))
-                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                        .build()
-
-                    requestExecutor.execute(coverReq).use { coverResp ->
-                        if (coverResp.isSuccessful && coverResp.body != null) {
-                            coverResp.body!!.byteStream().use { cin ->
-                                FileOutputStream(coverFile).use { cout -> cin.copyTo(cout) }
-                            }
-                            if (coverFile.exists() && coverFile.length() > 0) {
-                                val app = context.applicationContext as? OpenReadEraApplication
-                                val updated = scanned.copy(
-                                    coverPath = coverFile.absolutePath,
-                                    title = if (scanned.title == "Desconocido" || scanned.title.isBlank()) book.title else scanned.title,
-                                    author = if (scanned.author == "Desconocido" || scanned.author.isBlank()) book.author else scanned.author
-                                )
-                                app?.repository?.updateBook(updated)
-                            }
-                        }
+                    if (downloadCover(book.coverUrl, coverFile)) {
+                        val app = context.applicationContext as? OpenReadEraApplication
+                        app?.repository?.updateBook(scanned.copy(
+                            coverPath = coverFile.absolutePath,
+                            title = if (scanned.title == "Desconocido" || scanned.title.isBlank()) book.title else scanned.title,
+                            author = if (scanned.author == "Desconocido" || scanned.author.isBlank()) book.author else scanned.author
+                        ))
                     }
                 } catch (ce: Exception) {
                     ce.printStackTrace()
@@ -203,6 +185,27 @@ class CatalogDownloader(private val context: Context) {
             tempFile.delete()
             finalFile?.delete()
             Result.failure(e)
+        }
+    }
+
+    internal fun downloadCover(url: String, target: File, byteLimit: Long = TransferLimits.COVER): Boolean {
+        val request = Request.Builder().url(CatalogUrlSecurity.checkedUrl(url))
+            .header("User-Agent", "Mozilla/5.0").build()
+        val temporary = File.createTempFile(".catalog-cover-", ".tmp", target.parentFile)
+        try {
+            return requestExecutor.execute(request).use { response ->
+                val body = response.body
+                if (!response.isSuccessful || body == null) return@use false
+                TransferLimits.checkAdvertised(body.contentLength(), byteLimit)
+                body.byteStream().use { input ->
+                    temporary.outputStream().use { copyBounded(input, it, byteLimit) }
+                }
+                if (temporary.length() == 0L) return@use false
+                check(temporary.renameTo(target)) { "Cannot finalize cover" }
+                true
+            }
+        } finally {
+            temporary.delete()
         }
     }
 

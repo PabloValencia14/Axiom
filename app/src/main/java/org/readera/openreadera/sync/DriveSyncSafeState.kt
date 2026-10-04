@@ -208,7 +208,8 @@ internal object DriveSyncSafeState {
     suspend fun mergeAndApplyManualCategoryOverrides(
         context: Context,
         database: AppDatabase,
-        remote: JSONArray?
+        remote: JSONArray?,
+        session: DriveAccountGuard.Session
     ): JSONArray {
         val books = database.bookDao().getAllBooksIncludingTrashList()
         val booksByIdentity = buildMap {
@@ -237,12 +238,14 @@ internal object DriveSyncSafeState {
                 overrides[identity] = category
             }
         }
-        for ((identity, category) in overrides) {
-            booksByIdentity[identity]?.let { book ->
-                DocumentCategoryClassifier.setManualCategory(context, book, category)
+        return session.commit {
+            for ((identity, category) in overrides) {
+                booksByIdentity[identity]?.let { book ->
+                    DocumentCategoryClassifier.setManualCategoryBlocking(context, book, category)
+                }
             }
+            manualCategoryOverrides(context, books)
         }
-        return manualCategoryOverrides(context, books)
     }
 
     private fun encodeCatalogs(catalogs: List<OpdsCatalog>): JSONArray =

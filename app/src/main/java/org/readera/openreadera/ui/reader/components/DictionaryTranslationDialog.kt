@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -81,47 +82,49 @@ fun DictionaryTranslationDialog(
                     .header("User-Agent", "Axiom/1.0 (Android Tablet; Reading Assistant)")
                     .build()
 
-                val resp = client.newCall(request).execute()
-                if (resp.isSuccessful) {
-                    val body = resp.body?.string() ?: ""
-                    val json = JSONObject(body)
-                    val title = json.optString("title", cleanTerm)
-                    val extract = json.optString("extract", "")
-                    val thumb = json.optJSONObject("thumbnail")?.optString("source")
+                client.newCall(request).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: ""
+                        val json = JSONObject(body)
+                        val title = json.optString("title", cleanTerm)
+                        val extract = json.optString("extract", "")
+                        val thumb = json.optJSONObject("thumbnail")?.optString("source")
 
-                    if (extract.isNotBlank()) {
-                        wikiTitle = title
-                        wikiSummary = extract
-                        wikiImageUrl = thumb
-                    } else {
-                        wikiError = "No se encontró definición directa para «$cleanTerm»."
-                    }
-                } else if (resp.code == 404) {
-                    // Try search query fallback
-                    val searchUrl = "https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json"
-                    val searchReq = Request.Builder().url(searchUrl).header("User-Agent", "Axiom/1.0").build()
-                    val searchResp = client.newCall(searchReq).execute()
-                    if (searchResp.isSuccessful) {
-                        val searchBody = searchResp.body?.string() ?: ""
-                        val sJson = JSONObject(searchBody)
-                        val sList = sJson.optJSONObject("query")?.optJSONArray("search")
-                        if (sList != null && sList.length() > 0) {
-                            val first = sList.getJSONObject(0)
-                            wikiTitle = first.optString("title")
-                            val rawSnippet = first.optString("snippet")
-                                .replace("<span class=\"searchmatch\">", "")
-                                .replace("</span>", "")
-                            wikiSummary = "$rawSnippet..."
+                        if (extract.isNotBlank()) {
+                            wikiTitle = title
+                            wikiSummary = extract
+                            wikiImageUrl = thumb
                         } else {
-                            wikiError = "Sin resultados en la enciclopedia para «$cleanTerm»."
+                            wikiError = "No se encontró definición directa para «$cleanTerm»."
+                        }
+                    } else if (resp.code == 404) {
+                        val searchUrl = "https://es.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json"
+                        val searchReq = Request.Builder().url(searchUrl).header("User-Agent", "Axiom/1.0").build()
+                        client.newCall(searchReq).execute().use { searchResp ->
+                            if (searchResp.isSuccessful) {
+                                val searchBody = searchResp.body?.string() ?: ""
+                                val sJson = JSONObject(searchBody)
+                                val sList = sJson.optJSONObject("query")?.optJSONArray("search")
+                                if (sList != null && sList.length() > 0) {
+                                    val first = sList.getJSONObject(0)
+                                    wikiTitle = first.optString("title")
+                                    val rawSnippet = first.optString("snippet")
+                                        .replace("<span class=\"searchmatch\">", "")
+                                        .replace("</span>", "")
+                                    wikiSummary = "$rawSnippet..."
+                                } else {
+                                    wikiError = "Sin resultados en la enciclopedia para «$cleanTerm»."
+                                }
+                            } else {
+                                wikiError = "Sin resultados en la enciclopedia para «$cleanTerm»."
+                            }
                         }
                     } else {
-                        wikiError = "Sin resultados en la enciclopedia para «$cleanTerm»."
+                        wikiError = "Error al consultar la enciclopedia (HTTP ${resp.code})"
                     }
-                } else {
-                    wikiError = "Error al consultar la enciclopedia (HTTP ${resp.code})"
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 wikiError = "Error de conexión: ${e.localizedMessage ?: "Verifique internet"}"
             } finally {
                 isWikiLoading = false

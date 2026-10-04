@@ -37,8 +37,29 @@ fun SettingsScreen(
 ) {
     var selectedCategoryTab by remember { mutableIntStateOf(0) }
     val context = LocalContext.current
+    val packageInfo = remember(context) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+    val appVersionName = packageInfo?.versionName ?: "1.0.1"
+    val appVersionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+        packageInfo?.longVersionCode ?: 2L
+    } else {
+        @Suppress("DEPRECATION")
+        packageInfo?.versionCode?.toLong() ?: 2L
+    }
     val openRouterKeyStore = remember(context) { OpenRouterKeyStore(context) }
-
     // Subscreen dialog states
     var showScanFilesDialog by remember { mutableStateOf(false) }
     var showPageTurningDialog by remember { mutableStateOf(false) }
@@ -276,7 +297,7 @@ fun SettingsScreen(
                         )
                         SettingsItem(
                             title = "Acerca de Axiom",
-                            subtitle = "Versión 1.0.0 (Open Source), novedades y licencias",
+                            subtitle = "Versión $appVersionName (Open Source), novedades y licencias",
                             icon = Icons.Default.Info,
                             onClick = { showAboutOpenReadEraDialog = true }
                         )
@@ -392,7 +413,11 @@ fun SettingsScreen(
     }
 
     if (showAboutOpenReadEraDialog) {
-        AboutOpenReadEraDialog(onDismiss = { showAboutOpenReadEraDialog = false })
+        AboutOpenReadEraDialog(
+            versionName = appVersionName,
+            versionCode = appVersionCode,
+            onDismiss = { showAboutOpenReadEraDialog = false }
+        )
     }
 
     if (showAppThemeDialog) {
@@ -479,24 +504,34 @@ private fun ScanFilesDialog(
         title = { Text("Examinar archivos", fontWeight = FontWeight.Bold) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Búsqueda de libros y documentos compatibles en el almacenamiento del dispositivo y en Descargas.")
-                Spacer(modifier = Modifier.height(6.dp))
-                Text("Formatos admitidos:", fontWeight = FontWeight.SemiBold)
-                Text("• EPUB, PDF, MOBI, FB2, CBZ, CBR, TXT, RTF, DOC, DOCX, DJVU")
+                Text("Búsqueda y catalogación de libros y documentos en el almacenamiento del dispositivo y en Descargas.")
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("Formatos con lector integrado:", fontWeight = FontWeight.SemiBold)
+                Text("• PDF, EPUB, MOBI / AZW / AZW3 (sin DRM), FB2, TXT, DOCX, CBZ")
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("Formatos indexados en biblioteca (sin motor de lectura):", fontWeight = FontWeight.SemiBold)
+                Text("• DJVU, DOC, RTF, CBR, CHM")
                 Spacer(modifier = Modifier.height(10.dp))
                 Button(
                     onClick = {
                         onTriggerScan()
                         onDismiss()
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
                 ) {
                     Text("COMENZAR BÚSQUEDA")
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("CERRAR") }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text("CERRAR")
+            }
         }
     )
 }
@@ -634,7 +669,11 @@ private fun LanguageDialog(onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun AboutOpenReadEraDialog(onDismiss: () -> Unit) {
+private fun AboutOpenReadEraDialog(
+    versionName: String,
+    versionCode: Long,
+    onDismiss: () -> Unit
+) {
     var tabIndex by remember { mutableIntStateOf(0) }
     val tabs = listOf("LO NUEVO", "ACERCA DE", "LICENCIAS")
 
@@ -657,24 +696,34 @@ private fun AboutOpenReadEraDialog(onDismiss: () -> Unit) {
                     0 -> {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             item {
-                                Text("Versión 1.0.0 (Open Source)", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                                Text("• Sincronización automática periódica en segundo plano con Google Drive para libros y progreso.\n• Modos de lectura Día, Noche, Sepia y Negro Puro OLED de alto contraste.\n• Soporte multiformato: EPUB, PDF, MOBI, FB2, CBZ, CBR, TXT.\n• Descargador integrado con catálogos Z-Library, arXiv y MangaDex.\n• Interfaz Material 3 optimizada para tablets y teléfonos.")
+                                Text(
+                                    text = "Versión $versionName (Open Source)",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("• Soporte de lectura integrado: EPUB, PDF, MOBI/AZW/AZW3 (conversión sin DRM), FB2, TXT/Markdown, DOCX y CBZ.\n• Catalogación e indexación en biblioteca: exploración de archivos locales con soporte ampliado (formatos como DJVU, DOC, RTF, CBR y CHM se indexan para su organización, pero no disponen de motor de lectura en esta versión).\n• Modos de lectura: Día, Noche, Sepia y Negro Puro OLED de alto contraste para pantallas AMOLED.\n• Herramientas de lectura: notas, citas, marcadores, texto a voz (TTS) y trazado con stylus con soporte nativo Android Ink.\n• Sincronización periódica en segundo plano con Google Drive para libros y progreso.\n• Interfaz Material 3 optimizada para teléfonos, tablets y orientación horizontal.")
                             }
                         }
                     }
                     1 -> {
                         Column {
-                            Text("Axiom para Android", fontWeight = FontWeight.Bold)
+                            Text(
+                                text = "Axiom para Android — v$versionName ($versionCode)",
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text("Lector de libros y documentos libre y de código abierto.")
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text("Desarrollado con Jetpack Compose Material 3, Kotlin Coroutines, WorkManager y Room Database.")
+                            Text("Desarrollado con Jetpack Compose Material 3, AndroidX Lifecycle, Kotlin Coroutines, Room Database, Coil, ML Kit OCR / Document Scanner, PDFBox Android y libmobi JNI.")
                         }
                     }
                     2 -> {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             item {
                                 Text("Licencias de código abierto:", fontWeight = FontWeight.Bold)
-                                Text("• MuPDF: GNU AGPL\n• CoolReader: GNU GPL v2\n• Libmobi: GNU LGPL\n• DjVuLibre: GNU GPL v2\n• FreeType: FTL / GPL\n• Jetpack Compose: Apache 2.0")
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("• Axiom (código propio de la aplicación): GNU AGPL v3 o posterior (ver LICENSE)\n• libmobi (conversor JNI de terceros): GNU LGPL v3 o posterior\n• PDFBox Android (Tom Roush): Apache License 2.0\n• Google ML Kit (Text Recognition y Document Scanner): Google Play Services / Apache 2.0\n• Jetpack Compose y AndroidX: Apache License 2.0\n• Kotlin y Coroutines: Apache License 2.0\n• Room Database: Apache License 2.0\n• Coil (carga de imágenes): Apache License 2.0\n• OkHttp (cliente de red): Apache License 2.0\n• Jsoup (análisis HTML): MIT License\n• miniz (compresión): Dominio público / MIT")
                             }
                         }
                     }
@@ -682,7 +731,12 @@ private fun AboutOpenReadEraDialog(onDismiss: () -> Unit) {
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss) { Text("CERRAR") }
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text("CERRAR")
+            }
         }
     )
 }

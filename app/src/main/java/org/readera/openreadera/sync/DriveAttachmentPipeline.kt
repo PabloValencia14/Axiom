@@ -6,6 +6,9 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.security.DigestOutputStream
+import org.readera.openreadera.core.io.TransferLimits
+import org.readera.openreadera.core.io.copyBounded
 
 internal data class DriveAttachmentSource(
     val size: Long,
@@ -27,16 +30,22 @@ internal data class DriveAttachmentRef(
 internal interface DriveBlobStore {
     suspend fun contains(name: String): Boolean
     suspend fun upload(name: String, mimeType: String, source: DriveAttachmentSource, expectedSha256: String)
-    suspend fun download(name: String): InputStream?
-    suspend fun downloadLegacy(name: String): InputStream?
+    suspend fun download(name: String, maxBytes: Long): InputStream?
+    suspend fun downloadLegacy(name: String, maxBytes: Long): InputStream?
 }
 
 internal class DriveAttachmentPipeline(
     private val localRoot: File,
-    private val blobStore: DriveBlobStore
+    private val blobStore: DriveBlobStore,
+    private val session: DriveAccountGuard.Session? = null
 ) {
+    private fun <T> commit(action: () -> T): T = if (session == null) action() else session.commit(action)
+
     suspend fun upload(source: DriveAttachmentSource): DriveAttachmentRef {
-        val digest = digest(source.open)
+        val limit = if (source.mimeType.startsWith("image/")) TransferLimits.COVER else TransferLimits.DOCUMENT
+        require(source.size in 0..limit) { "Attachment too large" }
+        val digest = digest(source.open, source.size)
+        session?.checkCurrent()
         val name = "$BLOB_PREFIX$digest"
         if (!blobStore.contains(name)) blobStore.upload(name, source.mimeType, source, digest)
         return DriveAttachmentRef(digest, name, source.size, safeExtension(source.extension), source.mimeType, source.modifiedAt)
@@ -45,23 +54,25 @@ internal class DriveAttachmentPipeline(
     suspend fun restore(reference: DriveAttachmentRef, kind: Kind): File {
         require(reference.sha256.matches(SHA256_PATTERN)) { "Invalid attachment checksum" }
         require(reference.remoteName == "$BLOB_PREFIX${reference.sha256}") { "Invalid attachment name" }
-        require(reference.size >= 0L)
-        val input = blobStore.download(reference.remoteName) ?: error("Drive attachment is missing")
-        return install(input, reference.sha256, reference.size, reference.extension, kind).also { restored ->
-            if (reference.modifiedAt > 0L) check(restored.setLastModified(reference.modifiedAt)) {
-                "Unable to preserve attachment modification time"
+        require(reference.size in 0..kind.limit) { "Attachment too large" }
+        val input = blobStore.download(reference.remoteName, reference.size) ?: error("Drive attachment is missing")
+        return input.use { install(it, reference.sha256, reference.size, reference.extension, kind) }.also { restored ->
+            commit {
+                if (reference.modifiedAt > 0L) check(restored.setLastModified(reference.modifiedAt)) {
+                    "Unable to preserve attachment modification time"
+                }
             }
         }
     }
 
     suspend fun restoreLegacy(name: String, extension: String, kind: Kind): File? {
-        val input = blobStore.downloadLegacy(name) ?: return null
-        return install(input, expectedSha256 = null, expectedSize = null, extension = extension, kind = kind)
+        val input = blobStore.downloadLegacy(name, kind.limit) ?: return null
+        return input.use { install(it, expectedSha256 = null, expectedSize = null, extension = extension, kind = kind) }
     }
 
-    enum class Kind(val directory: String) {
-        BOOK("imported/synced"),
-        COVER("covers/synced")
+    enum class Kind(val directory: String, val limit: Long) {
+        BOOK("imported/synced", TransferLimits.DOCUMENT),
+        COVER("covers/synced", TransferLimits.COVER)
     }
 
     private fun install(
@@ -80,13 +91,8 @@ internal class DriveAttachmentPipeline(
             var copied = 0L
             input.use { source ->
                 FileOutputStream(temporary).use { output ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    while (true) {
-                        val count = source.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        md.update(buffer, 0, count)
-                        copied += count
+                    copied = copyBounded(source, DigestOutputStream(output, md), kind.limit, expectedSize) {
+                        session?.checkCurrent()
                     }
                     output.fd.sync()
                 }
@@ -95,15 +101,17 @@ internal class DriveAttachmentPipeline(
             check(expectedSha256 == null || actualHash == expectedSha256) { "Drive attachment checksum mismatch" }
             check(expectedSize == null || copied == expectedSize) { "Drive attachment size mismatch" }
             val target = File(directory, "${expectedSha256 ?: actualHash}$suffix")
-            if (expectedSha256 != null && target.isFile && target.length() == expectedSize &&
-                digest { FileInputStream(target) } == expectedSha256
-            ) {
-                temporary.delete()
-                return target
+            return commit {
+                if (expectedSha256 != null && target.isFile && target.length() == expectedSize &&
+                    digest(open = { FileInputStream(target) }, expectedSize = expectedSize) == expectedSha256
+                ) {
+                    temporary.delete()
+                } else {
+                    if (target.exists() && !target.delete()) error("Unable to replace local attachment")
+                    check(temporary.renameTo(target)) { "Unable to finalize local attachment" }
+                }
+                target
             }
-            if (target.exists() && !target.delete()) error("Unable to replace local attachment")
-            check(temporary.renameTo(target)) { "Unable to finalize local attachment" }
-            return target
         } catch (failure: Exception) {
             temporary.delete()
             throw failure
@@ -112,7 +120,6 @@ internal class DriveAttachmentPipeline(
 
     companion object {
         private const val BLOB_PREFIX = "openreadera_blob_"
-        private const val BUFFER_SIZE = 64 * 1024
         private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
 
         fun source(file: File, mimeType: String = mimeTypeFor(file.extension)): DriveAttachmentSource {
@@ -120,23 +127,14 @@ internal class DriveAttachmentPipeline(
             return DriveAttachmentSource(file.length(), file.extension, mimeType, file.lastModified()) { FileInputStream(file) }
         }
 
-        fun sha256(source: DriveAttachmentSource): String = digest(source.open)
+        fun sha256(source: DriveAttachmentSource): String = digest(source.open, source.size)
 
         fun copyVerified(source: DriveAttachmentSource, output: OutputStream, expectedSha256: String): Long {
             val md = MessageDigest.getInstance("SHA-256")
-            var copied = 0L
-            source.open().use { input ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    output.write(buffer, 0, count)
-                    md.update(buffer, 0, count)
-                    copied += count
-                }
+            val copied = source.open().use { input ->
+                copyBounded(input, DigestOutputStream(output, md), TransferLimits.DOCUMENT, source.size)
             }
             check(md.digest().toHex() == expectedSha256) { "Attachment changed while uploading" }
-            check(source.size < 0L || copied == source.size) { "Attachment size changed while uploading" }
             return copied
         }
 
@@ -151,15 +149,14 @@ internal class DriveAttachmentPipeline(
             else -> "application/octet-stream"
         }
 
-        private fun digest(open: () -> InputStream): String {
+        private fun digest(open: () -> InputStream, expectedSize: Long? = null): String {
             val md = MessageDigest.getInstance("SHA-256")
             open().use { input ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    md.update(buffer, 0, count)
+                val discarded = object : OutputStream() {
+                    override fun write(value: Int) { md.update(value.toByte()) }
+                    override fun write(buffer: ByteArray, offset: Int, length: Int) { md.update(buffer, offset, length) }
                 }
+                copyBounded(input, discarded, TransferLimits.DOCUMENT, expectedSize)
             }
             return md.digest().toHex()
         }

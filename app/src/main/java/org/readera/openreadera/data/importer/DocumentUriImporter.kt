@@ -9,21 +9,25 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.util.Locale
+import org.readera.openreadera.core.io.TransferLimits
+import org.readera.openreadera.core.io.copyBounded
 
 /** Copies a document URI to stable app storage before the reader opens it. */
 object DocumentUriImporter {
 
     suspend fun import(context: Context, uri: Uri): File? = withContext(Dispatchers.IO) {
         when (uri.scheme?.lowercase(Locale.ROOT)) {
-            "file" -> uri.path?.let(::File)?.takeIf { it.isFile && it.canRead() }
+            "file" -> uri.path?.let(::File)?.let { DocumentLocationPolicy.forContext(context).externalDocument(it) }
             "content" -> importContentUri(context, uri)
             else -> null
         }
     }
 
-    private fun importContentUri(context: Context, uri: Uri): File? {
+    internal fun importContentUri(context: Context, uri: Uri, byteLimit: Long = TransferLimits.DOCUMENT): File? {
         val resolver = context.contentResolver
         val mimeType = resolver.getType(uri)
+        val advertisedSize = querySize(resolver, uri)
+        TransferLimits.checkAdvertised(advertisedSize, byteLimit)
         val rawName = queryDisplayName(resolver, uri)
             ?: uri.lastPathSegment?.substringAfterLast('/')
             ?: "document"
@@ -37,7 +41,7 @@ object DocumentUriImporter {
 
         return try {
             resolver.openInputStream(uri)?.use { input ->
-                temporary.outputStream().use { output -> input.copyTo(output) }
+                temporary.outputStream().use { output -> copyBounded(input, output, byteLimit) }
             } ?: return null
 
             if (!temporary.isFile || temporary.length() == 0L) return null
@@ -56,6 +60,14 @@ object DocumentUriImporter {
         }
     } catch (_: Exception) {
         null
+    }
+
+    private fun querySize(resolver: android.content.ContentResolver, uri: Uri): Long = try {
+        resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else -1L
+        } ?: -1L
+    } catch (_: Exception) {
+        -1L
     }
 
     private fun sanitizeFileName(rawName: String): String {

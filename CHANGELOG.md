@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Batch automatic library scans with a 30-second resume throttle while explicit refresh remains immediate; preserve curated metadata, annotations, trashed records and their covers. Move latest-wins filtering/sorting off the main thread and debounce only text matching.
+- Share preview and full-page bitmaps under a 32–128 MiB cache budget with a moving prefetch window; make movement lock prevent touch pan/zoom while keeping page navigation available.
+- Add labeled 48 dp theme choices, working General settings navigation, fixed-layout-only CBZ controls, and truthful empty-page/Stop behavior for TTS.
+- Translate every page with native text (no former 200-page cap), omit pages without text, disclose sending text to Google Translate, fail on translation errors, support cancellation and write collision-safe unique outputs.
+- Adapt library layouts and empty states; show the runtime app version and accurate format/dependency/license information without implying that format hints add reader engines.
+- Reject app-private paths and records at import/Drive attachment boundaries; bind OAuth state to the selected account, cancel stale work and reject late results. Legacy Google tokens without an account binding require reauthorization. Apply bounded stream handling and guarded requests to LibGen search and intermediate pages.
+- Enforce these limits: documents 256 MiB, covers 8 MiB, snapshots 16 MiB, catalog pages 4 MiB; EPUB members 2 MiB each, 16 MiB cumulative decompressed data, 10,000 ZIP/manifest entries and 2,000 spine references.
+- Verification: 96 unit tests across 26 classes passed with zero failures, errors or skips; five permanent Xiaomi Pad 7 fixture cases passed. Read-only browsing of the real library was performed. A separate final MainActivity Settings UI smoke passed (General, disclosure, Reading, Other and About; one instrumented test) and confirmed version 1.0.1 and reader-versus-indexed format guidance. No universal smoothness/benchmark or live remote-service validation is claimed.
+
 ## 1.0.1 — 2026-10-03
 - Render writing tools as a compact floating capsule bar overlay directly over the document viewport, removing the 364 dp side reservation and preserving full viewport width across writing state transitions.
 - Streamline the toolbar into an icon-only Concepts-inspired instrument strip (5 tools, 3 stroke line samples, 6 color discs, nonmodal undo/redo/clear, OCR status icon, and explicit close button) with zero persistent visible text in the bar and full accessibility semantics intact. Contextual width and color controls are hidden in eraser mode.

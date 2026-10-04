@@ -38,6 +38,7 @@ import coil.compose.AsyncImage
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.launch
 import org.readera.openreadera.data.model.Book
+import org.readera.openreadera.sync.DriveAccountGuard
 import org.readera.openreadera.sync.GoogleAuthManager
 import org.readera.openreadera.sync.GoogleDriveSyncManager
 import org.readera.openreadera.sync.GoogleUserProfile
@@ -56,6 +57,7 @@ fun DriveSyncScreen(
     val authManager = remember { GoogleAuthManager(context) }
     val syncManager = remember { GoogleDriveSyncManager(context) }
 
+    var accountSelectionSession by remember { mutableStateOf<DriveAccountGuard.Session?>(null) }
     var userProfile by remember { mutableStateOf(authManager.getUserProfile()) }
     var isSyncing by remember { mutableStateOf(false) }
     var lastSyncTime by remember { mutableLongStateOf(syncManager.getLastSyncTime()) }
@@ -113,9 +115,12 @@ fun DriveSyncScreen(
         }
     }
 
-    fun requestDriveAuthorization(email: String) {
+    fun requestDriveAuthorization(
+        email: String,
+        session: DriveAccountGuard.Session = authManager.beginAccountSelection()
+    ) {
         scope.launch {
-            val tokenRes = authManager.fetchOAuthToken(email)
+            val tokenRes = authManager.fetchOAuthToken(email, session)
             tokenRes.onSuccess { token ->
                 userProfile = authManager.saveAccountByEmail(email, token = token)
                 isDriveConnected = syncManager.isDriveConnected()
@@ -142,13 +147,18 @@ fun DriveSyncScreen(
     val accountChooserLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val launchSession = accountSelectionSession
+        accountSelectionSession = null
+        if (launchSession == null) return@rememberLauncherForActivityResult
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             val chosenEmail = result.data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
             if (!chosenEmail.isNullOrBlank()) {
-                val profile = authManager.saveAccountByEmail(chosenEmail)
+                val (profile, session) = runCatching {
+                    authManager.selectAccountByEmail(chosenEmail, launchSession = launchSession)
+                }.getOrNull() ?: return@rememberLauncherForActivityResult
                 userProfile = profile
                 syncMessage = "Cuenta seleccionada: $chosenEmail. Verificando acceso a Drive..."
-                requestDriveAuthorization(chosenEmail)
+                requestDriveAuthorization(chosenEmail, session)
             }
         }
     }
@@ -156,13 +166,16 @@ fun DriveSyncScreen(
     val googleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val launchSession = accountSelectionSession
+        accountSelectionSession = null
+        if (launchSession == null) return@rememberLauncherForActivityResult
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
             val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
             try {
                 val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)
                 if (account != null && !account.email.isNullOrBlank()) {
                     scope.launch {
-                        val res = authManager.handleSignInAccount(account)
+                        val res = authManager.handleSignInAccount(account, launchSession)
                         res.onSuccess {
                             userProfile = it
                             syncMessage = "Sesión iniciada con: ${it.email}"
@@ -183,14 +196,18 @@ fun DriveSyncScreen(
 
             val fallbackEmail = result.data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
             if (!fallbackEmail.isNullOrBlank()) {
-                val profile = authManager.saveAccountByEmail(fallbackEmail)
+                val (profile, session) = runCatching {
+                    authManager.selectAccountByEmail(fallbackEmail, launchSession = launchSession)
+                }.getOrNull() ?: return@rememberLauncherForActivityResult
                 userProfile = profile
-                requestDriveAuthorization(fallbackEmail)
+                requestDriveAuthorization(fallbackEmail, session)
             }
         }
     }
 
     fun launchGoogleAccountChooser() {
+        if (accountSelectionSession != null) return
+        accountSelectionSession = authManager.beginAccountSelection()
         try {
             val chooseIntent = android.accounts.AccountManager.newChooseAccountIntent(
                 null,
@@ -206,6 +223,7 @@ fun DriveSyncScreen(
             try {
                 googleLauncher.launch(authManager.googleSignInClient.signInIntent)
             } catch (ex: Exception) {
+                accountSelectionSession = null
                 syncMessage = "Error al abrir selector de cuenta: ${ex.localizedMessage}"
             }
         }
@@ -651,13 +669,11 @@ fun DriveSyncScreen(
                                 }
                                 OutlinedButton(
                                     onClick = {
-                                        authManager.signOut {
-                                            userProfile = null
-                                            syncManager.disconnectSafFolder()
-                                            safFolderName = null
-                                            isDriveConnected = false
-                                            syncMessage = "Sesión cerrada"
-                                        }
+                                        authManager.signOut()
+                                        userProfile = null
+                                        safFolderName = null
+                                        isDriveConnected = false
+                                        syncMessage = "Sesión cerrada"
                                     }
                                 ) {
                                     Text("Cerrar")

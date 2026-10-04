@@ -51,6 +51,16 @@ import java.io.File
 class ReaderInkTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private fun main(block: () -> Unit) = instrumentation.runOnMainSync(block)
+    private fun assertTargetForeground() {
+        val root = instrumentation.uiAutomation.rootInActiveWindow
+        assertEquals("Input stays within the authorized app", instrumentation.targetContext.packageName, root?.packageName?.toString())
+        assertTrue("Authorized app window has focus", root?.window?.isFocused == true)
+    }
+
+    private fun injectTarget(event: MotionEvent): Boolean {
+        assertTargetForeground()
+        return instrumentation.uiAutomation.injectInputEvent(event, true)
+    }
     private fun awaitCondition(block: () -> Boolean) {
         val caller = Throwable("Reader wait callsite")
         try {
@@ -90,8 +100,10 @@ class ReaderInkTest {
             }
             return null
         }
-        return instrumentation.uiAutomation.windows.firstNotNullOfOrNull { it.root?.let(::search) }
-            ?: instrumentation.uiAutomation.rootInActiveWindow?.let(::search)
+        val roots = instrumentation.uiAutomation.windows.mapNotNull { it.root } +
+            listOfNotNull(instrumentation.uiAutomation.rootInActiveWindow)
+        return roots.filter { it.packageName?.toString() == instrumentation.targetContext.packageName }
+            .firstNotNullOfOrNull(::search)
     }
 
     private fun node(label: String): AccessibilityNodeInfo {
@@ -121,7 +133,7 @@ class ReaderInkTest {
         }
         for (window in instrumentation.uiAutomation.windows) {
             text.append("WINDOW ").append(window.id).append(" type=").append(window.type).append('\n')
-            window.root?.let { visit(it, 0) }
+            window.root?.takeIf { it.packageName?.toString() == instrumentation.targetContext.packageName }?.let { visit(it, 0) }
         }
         File(instrumentation.targetContext.getExternalFilesDir(null), "ink-accessibility.txt").writeText(text.toString())
     }
@@ -144,6 +156,24 @@ class ReaderInkTest {
         }
         assertTrue("$label remains attached", target.refresh())
         assertTrue("$label is enabled", target.isEnabled)
+        assertTargetForeground()
+        if (!stylus) {
+            assertTrue("Activate $label", target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            instrumentation.waitForIdleSync()
+            return
+        }
+        var stableBounds: Rect? = null
+        var stableSince = SystemClock.uptimeMillis()
+        // Modal sheets and rotation can expose accessibility nodes before their hit targets stop moving.
+        awaitCondition {
+            target = node(label)
+            val currentBounds = Rect().also(target::getBoundsInScreen)
+            if (currentBounds != stableBounds) {
+                stableBounds = currentBounds
+                stableSince = SystemClock.uptimeMillis()
+            }
+            target.isVisibleToUser && !currentBounds.isEmpty && SystemClock.uptimeMillis() - stableSince >= 300
+        }
         val bounds = Rect()
         target.getBoundsInScreen(bounds)
         assertFalse("$label has visible bounds", bounds.isEmpty)
@@ -158,7 +188,7 @@ class ReaderInkTest {
             val event = MotionEvent.obtain(start, SystemClock.uptimeMillis(), action, 1,
                 arrayOf(pointer), arrayOf(point), 0, 0, 1f, 1f, 0, 0,
                 if (stylus) InputDevice.SOURCE_STYLUS else InputDevice.SOURCE_TOUCHSCREEN, 0)
-            assertTrue("Inject $label", instrumentation.uiAutomation.injectInputEvent(event, true))
+            assertTrue("Inject $label", injectTarget(event))
             event.recycle()
         }
         instrumentation.waitForIdleSync()
@@ -232,7 +262,7 @@ class ReaderInkTest {
                 if (mixed) arrayOf(pointer, palmPointer) else arrayOf(pointer),
                 if (mixed) arrayOf(coordinates, palmCoordinates) else arrayOf(coordinates), 0, 0, 1f, 1f, 0, 0,
                 InputDevice.SOURCE_STYLUS, if (canceled && step == 8) MotionEvent.FLAG_CANCELED else 0)
-            instrumentation.sendPointerSync(event)
+            assertTrue("Inject fixture stroke", injectTarget(event))
             event.recycle()
             SystemClock.sleep(12)
         }
@@ -254,7 +284,7 @@ class ReaderInkTest {
             val event = MotionEvent.obtain(time, SystemClock.uptimeMillis(), action,
                 location[0] + view.width / 2f, location[1] + view.height / 2f, 0)
             event.source = InputDevice.SOURCE_TOUCHSCREEN
-            instrumentation.sendPointerSync(event)
+            assertTrue("Inject fixture finger tap", injectTarget(event))
             event.recycle()
         }
         instrumentation.waitForIdleSync()
@@ -263,6 +293,7 @@ class ReaderInkTest {
     private fun screenshot(name: String) {
         instrumentation.waitForIdleSync()
         instrumentation.uiAutomation.waitForIdle(100, 5_000)
+        assertTargetForeground()
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
         val output = File(instrumentation.targetContext.getExternalFilesDir(null), "$name.png")
         output.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -640,7 +671,7 @@ class ReaderInkTest {
             for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
                 val event = MotionEvent.obtain(outsideTime, SystemClock.uptimeMillis(), action,
                     outside[0].toFloat(), outside[1].toFloat(), 0).apply { source = InputDevice.SOURCE_TOUCHSCREEN }
-                assertTrue(instrumentation.uiAutomation.injectInputEvent(event, true))
+                assertTrue(injectTarget(event))
                 event.recycle()
             }
             assertNotNull("Outside drawing/navigation never dismisses the panel", findNode("Pluma"))
@@ -1045,6 +1076,7 @@ class ReaderInkTest {
         var store = ViewModelStore()
         lateinit var model: ReaderViewModel
         lateinit var activity: ReaderInkTestActivity
+        var openedAppSettings = 0
         fun mount(id: Long) {
             scenario.onActivity {
                 activity = it
@@ -1055,7 +1087,8 @@ class ReaderInkTest {
                 store.put("reader", model)
                 activity.setContent {
                     OpenReadEraTheme {
-                        ReaderScreen(model, onBack = {}, onOpenDocumentDetails = {})
+                        ReaderScreen(model, onBack = {}, onOpenDocumentDetails = {},
+                            onOpenAppSettings = { openedAppSettings++ })
                     }
                 }
             }
@@ -1098,7 +1131,7 @@ class ReaderInkTest {
                 val event = MotionEvent.obtain(time, SystemClock.uptimeMillis(), action, 1,
                     arrayOf(pointer), arrayOf(coords), 0, 0, 1f, 1f, 0, 0,
                     if (stylus) InputDevice.SOURCE_STYLUS else InputDevice.SOURCE_TOUCHSCREEN, 0)
-                assertTrue(instrumentation.uiAutomation.injectInputEvent(event, true))
+                assertTrue(injectTarget(event))
                 event.recycle()
                 if (step == 2) duringGesture?.invoke()
                 SystemClock.sleep(12)
@@ -1136,7 +1169,7 @@ class ReaderInkTest {
                 } }
                 val event = MotionEvent.obtain(time, SystemClock.uptimeMillis(), action, count,
                     pointers, coordinates, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
-                assertTrue(instrumentation.uiAutomation.injectInputEvent(event, true))
+                assertTrue(injectTarget(event))
                 event.recycle()
                 SystemClock.sleep(16)
             }
@@ -1218,6 +1251,10 @@ class ReaderInkTest {
                         unzoomedView.height.toFloat(), 600f / 850f)
                     val cx = origin[0] + unzoomedView.width / 2f
                     val cy = origin[1] + unzoomedView.height / 2f
+                    tapNode("Bloquear movimiento")
+                    pinch(cx, cy, 1.6f)
+                    assertTrue("Movement lock must prevent touch zoom", (displayedZoom() ?: 1f) <= 1.05f)
+                    tapNode("Desbloquear movimiento")
                     pinch(cx, cy, 1.6f)
                     awaitCondition { (displayedZoom() ?: 1f) > 1.3f }
                     val z = checkNotNull(displayedZoom())
@@ -1334,6 +1371,24 @@ class ReaderInkTest {
                 assertEquals(setOf(1), model.uiState.value.pageText.keys)
                 assertTrue(checkNotNull(model.uiState.value.pageText[1]?.layout).text.isBlank())
                 assertTrue(checkNotNull(model.uiState.value.pageText[1]?.layout).words.isEmpty())
+                val previousError = model.uiState.value.error
+                val rejected = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val feedback = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                    model.uiState.first { !it.error.isNullOrBlank() && it.error != previousError }
+                    rejected.complete(Unit)
+                }
+                try {
+                    main { model.startTts() }
+                    withTimeout(30_000) { rejected.await() }
+                } finally { feedback.cancel() }
+                assertFalse(model.uiState.value.isTtsActive)
+                assertTrue("Blank pages never receive fabricated speech", model.uiState.value.ttsText.isBlank())
+                main {
+                    model.startTts("Pending speech must not start after stop")
+                    model.stopTts()
+                }
+                delay(100)
+                assertFalse(model.uiState.value.isTtsActive)
                 stroke(view(), 0.15f, 0.3f, 0.75f, 0.4f)
                 delay(200)
                 assertEquals("Blank highlighter never commits a rectangle", if (id == pdfId) 2 else 1, model.uiState.value.strokes.size)
@@ -1360,6 +1415,30 @@ class ReaderInkTest {
                 delay(150)
                 assertEquals("Writing off does not ink silently", count, model.uiState.value.strokes.size)
             }
+            if (!model.uiState.value.isControlsVisible) main { model.toggleControls() }
+            tapNode("Configuraciones de lectura")
+            node("Configuración: Documento fijo (CBZ)")
+            assertNull("Comic pages have no font-family control", findNode("Tipo de fuente"))
+            assertNull("Comic pages have no line-spacing control", findNode("Interlineado"))
+            assertNull("Comic pages have no bionic-text control", findNode("Lectura Biónica"))
+            screenshot("reader-cbz-settings-fixed-layout")
+            fun scrollSettings(node: AccessibilityNodeInfo): Boolean {
+                if (node.isScrollable && node.rangeInfo == null &&
+                    node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) return true
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { if (scrollSettings(it)) return true }
+                }
+                return false
+            }
+            repeat(8) {
+                if (findNode("CONFIGURACIÓN GENERAL") == null) {
+                    assertTargetForeground()
+                    assertTrue("Scroll real settings sheet", instrumentation.uiAutomation.rootInActiveWindow?.let(::scrollSettings) == true)
+                    instrumentation.waitForIdleSync()
+                }
+            }
+            tapNode("CONFIGURACIÓN GENERAL")
+            awaitCondition { openedAppSettings == 1 }
             instrumentation.sendStatus(0, Bundle().apply { putString("stream",
                 "Real reader native-first/no-OCR, image PDF+CBZ MLKit words/copy/quote, exact word highlight, " +
                     "blank no-fallback, canceled book/page work, persistent panel and typed stylus navigation passed.\n") })

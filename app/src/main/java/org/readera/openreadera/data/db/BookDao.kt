@@ -60,12 +60,17 @@ interface BookDao {
     suspend fun update(book: Book)
 
     @Query("""
-        UPDATE books SET title = :title, author = :author, coverPath = :coverPath,
-        sha1 = :sha1, language = :language, genre = :genre, description = :description,
-        series = :series WHERE id = :id
+        UPDATE books SET
+        title = CASE WHEN title = '' OR title = 'Desconocido' OR title = :fileTitle THEN :title ELSE title END,
+        author = CASE WHEN author = '' OR author IN ('Desconocido', 'Autor desconocido') THEN :author ELSE author END,
+        coverPath = :coverPath, sha1 = :sha1,
+        language = COALESCE(language, :language), genre = COALESCE(genre, :genre),
+        description = COALESCE(description, :description), series = COALESCE(series, :series)
+        WHERE id = :id
     """)
     suspend fun updateCoverAndMetadata(
         id: Long,
+        fileTitle: String,
         title: String,
         author: String,
         coverPath: String?,
@@ -84,9 +89,6 @@ interface BookDao {
 
     @Query("UPDATE books SET status = 'READING', lastOpened = :now WHERE id = :id")
     suspend fun markAsReading(id: Long, now: Long = System.currentTimeMillis())
-
-    @Query("UPDATE books SET isTrash = 0, currentPage = 382, progressPercent = 91.6067, status = 'READING', totalPages = 417 WHERE (title LIKE '%tres cuerpo%' OR filePath LIKE '%tres cue%')")
-    suspend fun restoreTresCuerpos()
 
     @Query("UPDATE books SET isFavorite = :isFavorite WHERE id = :id")
     suspend fun setFavorite(id: Long, isFavorite: Boolean)

@@ -56,6 +56,8 @@ class EpubEngine : DocumentEngine {
             }
 
             zip = ZipFile(file)
+            val budget = EpubReadBudget()
+            budget.checkArchive(zip)
 
             // 1. Locate rootfile from META-INF/container.xml
             val containerEntry = zip.getEntry("META-INF/container.xml")
@@ -64,7 +66,7 @@ class EpubEngine : DocumentEngine {
                 return false
             }
 
-            val containerXml = zip.getInputStream(containerEntry).bufferedReader().use { it.readText() }
+            val containerXml = budget.readText(zip, containerEntry)
             val opfPath = extractOpfPath(containerXml)
             if (opfPath.isEmpty()) {
                 Log.e(TAG, "Failed to resolve OPF path from container")
@@ -80,8 +82,8 @@ class EpubEngine : DocumentEngine {
                 return false
             }
 
-            val opfXml = zip.getInputStream(opfEntry).bufferedReader().use { it.readText() }
-            parseOpf(opfXml, zip)
+            val opfXml = budget.readText(zip, opfEntry)
+            parseOpf(opfXml, zip, budget)
 
             // 3. Paginate book content
             paginate()
@@ -109,7 +111,7 @@ class EpubEngine : DocumentEngine {
         return match?.groupValues?.get(1) ?: "OEBPS/content.opf"
     }
 
-    private fun parseOpf(opfXml: String, zip: ZipFile) {
+    private fun parseOpf(opfXml: String, zip: ZipFile, budget: EpubReadBudget) {
         // Extract metadata
         val titleMatch = Regex("""<dc:title[^>]*>(.*?)</dc:title>""", RegexOption.DOT_MATCHES_ALL).find(opfXml)
         bookTitle = titleMatch?.groupValues?.get(1)?.trim() ?: "Sin título"
@@ -121,6 +123,7 @@ class EpubEngine : DocumentEngine {
         val manifestMap = mutableMapOf<String, String>()
         val itemRegex = Regex("""<item\s+[^>]*id\s*=\s*["']([^"']+)["'][^>]*href\s*=\s*["']([^"']+)["']|<item\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*id\s*=\s*["']([^"']+)["']""")
         itemRegex.findAll(opfXml).forEach { match ->
+            budget.addManifestItem()
             val id = match.groups[1]?.value ?: match.groups[4]?.value
             val href = match.groups[2]?.value ?: match.groups[3]?.value
             if (id != null && href != null) {
@@ -134,6 +137,7 @@ class EpubEngine : DocumentEngine {
         if (spineMatch != null) {
             val itemrefRegex = Regex("""<itemref\s+[^>]*idref\s*=\s*["']([^"']+)["']""")
             itemrefRegex.findAll(spineMatch.groupValues[1]).forEach { ref ->
+                budget.addSpineItem()
                 spineItems.add(ref.groupValues[1])
             }
         }
@@ -145,10 +149,11 @@ class EpubEngine : DocumentEngine {
             val fullHref = resolveZipPath(opfDir, relativeHref)
 
             val entry = zip.getEntry(fullHref) ?: zip.getEntry(fullHref.removePrefix("/")) ?: continue
-            val rawHtml = zip.getInputStream(entry).bufferedReader().use { it.readText() }
+            val rawHtml = budget.readText(zip, entry)
             val cleanText = htmlToCleanText(rawHtml)
 
             if (cleanText.isBlank()) continue
+            budget.retainText(cleanText)
 
             // Determine chapter title
             val chapterTitle = extractChapterHeading(rawHtml, chapterIndex)

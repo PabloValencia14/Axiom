@@ -10,6 +10,9 @@ import com.google.android.gms.auth.api.signin.GoogleSignInClient
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.Scope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 data class GoogleUserProfile(
@@ -20,7 +23,11 @@ data class GoogleUserProfile(
     val accessToken: String? = null
 )
 
-class GoogleAuthManager(private val context: Context) {
+class GoogleAuthManager(
+    private val context: Context,
+    private val signOutRequest: ((() -> Unit) -> Unit)? = null,
+    private val tokenProvider: ((String) -> String)? = null
+) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("google_sync_prefs", Context.MODE_PRIVATE)
@@ -39,25 +46,30 @@ class GoogleAuthManager(private val context: Context) {
         get() = prefs.getBoolean("is_signed_in", false)
 
     fun getUserProfile(): GoogleUserProfile? {
-        val isExplicitlySignedOut = prefs.getBoolean("explicitly_signed_out", false)
+        getSelectedProfile()?.let { return it }
+        val session = DriveAccountGuard.capture()
+        if (!prefs.getBoolean("explicitly_signed_out", false)) {
+            getDeviceGoogleAccounts().firstOrNull()?.let {
+                return selectAccountByEmail(it, launchSession = session).first
+            }
+        }
+        return null
+    }
+
+    internal fun getSelectedProfile(): GoogleUserProfile? = DriveAccountGuard.locked {
         val email = prefs.getString("google_email", "") ?: ""
         if (isSignedIn && email.isNotBlank()) {
-            return GoogleUserProfile(
+            return@locked GoogleUserProfile(
                 id = prefs.getString("google_id", "") ?: "",
                 email = email,
                 displayName = prefs.getString("google_name", email.substringBefore('@')) ?: email.substringBefore('@'),
                 photoUrl = prefs.getString("google_photo", null),
-                accessToken = prefs.getString("google_token", null)
+                accessToken = prefs.getString("google_token", null).takeIf {
+                    prefs.getString("google_token_account", null) == email
+                }
             )
         }
-        if (!isExplicitlySignedOut) {
-            val deviceAccounts = getDeviceGoogleAccounts()
-            if (deviceAccounts.isNotEmpty()) {
-                val preferred = deviceAccounts.find { it == "pablova04@gmail.com" } ?: deviceAccounts.first()
-                return saveAccountByEmail(preferred)
-            }
-        }
-        return null
+        null
     }
 
     fun getDeviceGoogleAccounts(): List<String> {
@@ -69,124 +81,135 @@ class GoogleAuthManager(private val context: Context) {
         }
     }
 
-    fun saveAccountByEmail(email: String, displayName: String? = null, token: String? = null): GoogleUserProfile {
-        val cleanEmail = email.trim()
-        val name = displayName?.ifBlank { null } ?: cleanEmail.substringBefore('@')
-        val existingToken = prefs.getString("google_token", null)
-        val finalToken = token ?: existingToken ?: "oauth2_bearer_${System.currentTimeMillis()}"
-        val profile = GoogleUserProfile(
-            id = "gid_${cleanEmail.hashCode()}",
-            email = cleanEmail,
-            displayName = name,
-            photoUrl = null,
-            accessToken = finalToken
-        )
-        prefs.edit()
-            .putBoolean("is_signed_in", true)
-            .putBoolean("explicitly_signed_out", false)
-            .putString("google_id", profile.id)
-            .putString("google_email", profile.email)
-            .putString("google_name", profile.displayName)
-            .putString("google_photo", profile.photoUrl)
-            .putString("google_token", profile.accessToken)
-            .apply()
-        return profile
-    }
+    fun saveAccountByEmail(email: String, displayName: String? = null, token: String? = null): GoogleUserProfile =
+        saveAccount(email, displayName, token, null).first
 
-    suspend fun fetchOAuthToken(email: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val account = android.accounts.Account(email.trim(), "com.google")
-            val token = GoogleAuthUtil.getToken(
-                context,
-                account,
-                "oauth2:$driveScopeAppData $driveScopeFile"
+    internal fun beginAccountSelection(): DriveAccountGuard.Session = DriveAccountGuard.capture()
+
+    internal fun selectAccountByEmail(
+        email: String,
+        displayName: String? = null,
+        launchSession: DriveAccountGuard.Session
+    ): Pair<GoogleUserProfile, DriveAccountGuard.Session> =
+        saveAccount(email, displayName, null, launchSession)
+
+    private fun saveAccount(
+        email: String,
+        displayName: String?,
+        token: String?,
+        expected: DriveAccountGuard.Session?
+    ): Pair<GoogleUserProfile, DriveAccountGuard.Session> {
+        val cleanEmail = email.trim().lowercase(java.util.Locale.ROOT)
+        require(cleanEmail.isNotBlank())
+        return DriveAccountGuard.updateIdentity(expected, invalidateWhen = {
+            val changed = prefs.getString("google_email", null) != cleanEmail
+            // OAuth callbacks may only authorize the still-selected identity.
+            require(token == null || !changed) { "Google account changed during authorization" }
+            require(token == null || (prefs.getString("google_token_account", null) == cleanEmail &&
+                prefs.getString("google_token", null) == token)) { "Stale Google authorization" }
+            changed
+        }) { session ->
+            val changed = prefs.getString("google_email", null) != cleanEmail
+            if (changed) {
+                context.getSharedPreferences("drive_sync_data", Context.MODE_PRIVATE).edit()
+                    .remove("target_folder_id").remove("target_folder_account")
+                    .remove("last_sync_timestamp").apply()
+            }
+            val finalToken = token ?: prefs.getString("google_token", null).takeIf {
+                !changed && prefs.getString("google_token_account", null) == cleanEmail
+            }
+            val profile = GoogleUserProfile(
+                id = "gid_${cleanEmail.hashCode()}", email = cleanEmail,
+                displayName = displayName?.takeIf(String::isNotBlank) ?: cleanEmail.substringBefore('@'),
+                accessToken = finalToken
             )
-            if (!token.isNullOrBlank()) {
-                prefs.edit().putString("google_token", token).apply()
-                Result.success(token)
-            } else {
-                Result.failure(Exception("No se recibió token OAuth"))
-            }
-        } catch (recoverable: com.google.android.gms.auth.UserRecoverableAuthException) {
-            Result.failure(recoverable)
-        } catch (e: Exception) {
-            val msg = e.message ?: ""
-            if (msg.contains("UNKNOWN", ignoreCase = true) || msg.contains("not registered", ignoreCase = true)) {
-                Result.failure(Exception("App no registrada en Google Cloud Console para esta huella SHA-1. Usa 'Vincular carpeta de Google Drive' para sincronizar directamente."))
-            } else {
-                Result.failure(e)
-            }
+            prefs.edit().putBoolean("is_signed_in", true).putBoolean("explicitly_signed_out", false)
+                .putString("google_id", profile.id).putString("google_email", cleanEmail)
+                .putString("google_name", profile.displayName).remove("google_photo")
+                .putString("google_token", finalToken)
+                .putString("google_token_account", if (finalToken != null) cleanEmail else null).apply()
+            profile to session
         }
     }
 
+    suspend fun fetchOAuthToken(email: String): Result<String> =
+        fetchOAuthToken(email, DriveAccountGuard.capture())
+
+    internal suspend fun fetchOAuthToken(email: String, session: DriveAccountGuard.Session): Result<String> =
+        withContext(Dispatchers.IO) {
+            val cleanEmail = email.trim().lowercase(java.util.Locale.ROOT)
+            val coroutineContext = currentCoroutineContext()
+            val job = checkNotNull(coroutineContext[Job])
+            try {
+                session.attach(job)
+                coroutineContext.ensureActive()
+                session.commit {
+                    require(prefs.getString("google_email", null) == cleanEmail) { "Google account changed" }
+                    prefs.edit().remove("google_token").remove("google_token_account").apply()
+                }
+                val token = (tokenProvider?.invoke(cleanEmail) ?: GoogleAuthUtil.getToken(
+                    context, android.accounts.Account(cleanEmail, "com.google"),
+                    "oauth2:$driveScopeAppData $driveScopeFile"
+                )).takeIf { !it.isNullOrBlank() } ?: error("No se recibió token OAuth")
+                session.commit {
+                    coroutineContext.ensureActive()
+                    require(prefs.getString("google_email", null) == cleanEmail) { "Google account changed" }
+                    prefs.edit().putString("google_token", token).putString("google_token_account", cleanEmail).apply()
+                }
+                Result.success(token)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Result.failure(failure)
+            } finally {
+                session.detach(job)
+            }
+        }
+
     suspend fun refreshToken(email: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val oldToken = prefs.getString("google_token", null)
+            val oldToken = getUserProfile()?.takeIf { it.email.equals(email.trim(), true) }?.accessToken
             if (!oldToken.isNullOrBlank()) {
                 try {
                     GoogleAuthUtil.clearToken(context, oldToken)
                 } catch (_: Exception) {}
             }
             fetchOAuthToken(email)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    suspend fun handleSignInAccount(account: GoogleSignInAccount): Result<GoogleUserProfile> = withContext(Dispatchers.IO) {
-        try {
-            val email = account.email ?: ""
-            if (email.isBlank()) {
-                return@withContext Result.failure(Exception("No se pudo obtener el correo de la cuenta Google"))
+    internal suspend fun handleSignInAccount(
+        account: GoogleSignInAccount,
+        launchSession: DriveAccountGuard.Session
+    ): Result<GoogleUserProfile> = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        val email = account.email?.takeIf(String::isNotBlank)
+            ?: return@withContext Result.failure(IllegalStateException("No se pudo obtener el correo de la cuenta Google"))
+        val (selected, session) = selectAccountByEmail(email, account.displayName, launchSession)
+        fetchOAuthToken(email, session).map { token ->
+            session.commit {
+                selected.copy(id = account.id ?: selected.id, photoUrl = account.photoUrl?.toString(), accessToken = token).also { profile ->
+                    prefs.edit().putString("google_id", profile.id).putString("google_photo", profile.photoUrl).apply()
+                }
             }
-
-            var token: String? = null
-            var recoverableEx: com.google.android.gms.auth.UserRecoverableAuthException? = null
-            try {
-                token = GoogleAuthUtil.getToken(
-                    context,
-                    account.account ?: android.accounts.Account(email, "com.google"),
-                    "oauth2:$driveScopeAppData $driveScopeFile"
-                )
-            } catch (r: com.google.android.gms.auth.UserRecoverableAuthException) {
-                recoverableEx = r
-            } catch (_: Exception) {
-                token = prefs.getString("google_token", null)
-            }
-
-            val profile = GoogleUserProfile(
-                id = account.id ?: "gid_${email.hashCode()}",
-                email = email,
-                displayName = account.displayName ?: email.substringBefore('@'),
-                photoUrl = account.photoUrl?.toString(),
-                accessToken = token
-            )
-
-            prefs.edit()
-                .putBoolean("is_signed_in", true)
-                .putString("google_id", profile.id)
-                .putString("google_email", profile.email)
-                .putString("google_name", profile.displayName)
-                .putString("google_photo", profile.photoUrl)
-                .putString("google_token", profile.accessToken)
-                .apply()
-
-            if (recoverableEx != null) {
-                Result.failure(recoverableEx)
-            } else {
-                Result.success(profile)
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 
     fun signOut(onComplete: () -> Unit = {}) {
-        prefs.edit().clear().putBoolean("explicitly_signed_out", true).apply()
+        DriveAccountGuard.updateIdentity {
+            prefs.edit().clear().putBoolean("explicitly_signed_out", true).apply()
+            context.getSharedPreferences("drive_sync_data", Context.MODE_PRIVATE).edit()
+                .remove("target_folder_id").remove("target_folder_account").remove("last_sync_timestamp")
+                .remove("saf_folder_uri").remove("saf_folder_name").apply()
+        }
         try {
-            googleSignInClient.signOut().addOnCompleteListener {
-                onComplete()
-            }
+            val request = signOutRequest
+            if (request != null) request(onComplete)
+            else googleSignInClient.signOut().addOnCompleteListener { onComplete() }
         } catch (_: Exception) {
             onComplete()
         }

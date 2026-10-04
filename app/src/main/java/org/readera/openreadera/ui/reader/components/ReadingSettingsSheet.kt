@@ -19,7 +19,8 @@ import org.readera.openreadera.data.model.ReaderViewMode
 @Composable
 fun ReadingSettingsSheet(
     settings: ReaderSettings,
-    isPdf: Boolean,
+    isFixedLayout: Boolean,
+    documentFormat: String,
     zoomScale: Float = 1.0f,
     onZoomChange: (Float) -> Unit = {},
     onDismiss: () -> Unit,
@@ -42,7 +43,7 @@ fun ReadingSettingsSheet(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                text = if (isPdf) "Configuración: Documento fijo (PDF)" else "Configuración: Texto refluible (EPUB)",
+                text = "Configuración: ${if (isFixedLayout) "Documento fijo" else "Texto refluible"} ($documentFormat)",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold
             )
@@ -107,29 +108,13 @@ fun ReadingSettingsSheet(
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    ReaderColorTheme.SYSTEM to "Sistema",
-                    ReaderColorTheme.DAY to "Día",
-                    ReaderColorTheme.SEPIA to "Sepia",
-                    ReaderColorTheme.NIGHT to "Noche",
-                    ReaderColorTheme.OLED to "OLED"
-                ).forEach { (theme, label) ->
-                    FilterChip(
-                        selected = settings.theme == theme,
-                        onClick = { onThemeChange(theme) },
-                        label = { Text(label, maxLines = 1) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                ReaderThemeChoices(settings.theme, onThemeChange)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            if (!isPdf) {
+            if (!isFixedLayout) {
                 // Perfil EPUB / FB2 / MOBI / DOC / DOCX / RTF / TXT / CHM
                 Text(text = "Tipo de fuente", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(8.dp))
@@ -203,7 +188,7 @@ fun ReadingSettingsSheet(
             Spacer(modifier = Modifier.height(12.dp))
 
 
-            if (!isPdf) {
+            if (!isFixedLayout) {
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Lectura Biónica

@@ -1,5 +1,7 @@
 package org.readera.openreadera.catalog
 
+import org.readera.openreadera.core.io.copyBounded
+
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -400,17 +402,5 @@ class OpdsCatalogRepository(context: Context) {
             cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, packed, 0, 12))
             return String(cipher.doFinal(packed, 12, packed.size - 12), Charsets.UTF_8)
         }
-    }
-}
-internal fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream, limit: Long, onCopied: (Long) -> Unit = {}): Long {
-    var total = 0L
-    val buffer = ByteArray(8192)
-    while (true) {
-        val count = input.read(buffer)
-        if (count < 0) return total
-        total += count
-        require(total <= limit) { "Response too large" }
-        output.write(buffer, 0, count)
-        onCopied(total)
     }
 }

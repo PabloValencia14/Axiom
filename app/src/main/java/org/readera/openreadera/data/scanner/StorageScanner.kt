@@ -2,12 +2,15 @@ package org.readera.openreadera.data.scanner
 
 import android.content.Context
 import android.os.Environment
+import android.os.SystemClock
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.readera.openreadera.data.model.Book
@@ -51,6 +54,20 @@ class StorageScanner(
 
     private val coverExtractor = CoverExtractor(context, repository)
     private val categoryClassifier = DocumentCategoryClassifier(context)
+    private val scanPrefs = context.getSharedPreferences("storage_scanner_prefs", Context.MODE_PRIVATE)
+    private val categoryMutex = Mutex()
+    private val classifiedBooks = mutableMapOf<Long, Pair<CategoryInputs, DocumentCategory>>()
+
+    private data class CategoryInputs(
+        val path: String,
+        val length: Long,
+        val modified: Long,
+        val title: String,
+        val genre: String?,
+        val series: String?,
+        val format: String,
+        val manual: DocumentCategory?
+    )
 
     private val scanMutex = Mutex()
     private val _isScanning = MutableStateFlow(false)
@@ -59,16 +76,18 @@ class StorageScanner(
     private val _scanProgress = MutableStateFlow(0)
     val scanProgress: StateFlow<Int> = _scanProgress.asStateFlow()
 
-    private var lastScanTimestamp: Long = 0L
+    private var lastScanTimestamp: Long? = null
 
-    suspend fun scanStorage() = withContext(Dispatchers.IO) {
-        val now = System.currentTimeMillis()
-        if (now - lastScanTimestamp < 30_000L && repository.getAllBooksList().isNotEmpty()) {
-            Log.d(TAG, "Storage scan throttled (<30s since last scan)")
-            return@withContext
-        }
+    // Explicit library/settings refreshes bypass the automatic resume throttle.
+    suspend fun scanStorage(force: Boolean = true) = withContext(Dispatchers.IO) {
         if (!scanMutex.tryLock()) {
             Log.i(TAG, "Storage scan is already in progress, skipping concurrent call")
+            return@withContext
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (!force && lastScanTimestamp?.let { now - it < 30_000L } == true) {
+            Log.d(TAG, "Storage scan throttled (<30s since last scan)")
+            scanMutex.unlock()
             return@withContext
         }
         _isScanning.value = true
@@ -115,38 +134,38 @@ class StorageScanner(
             // Do not delete database records just because a path is temporarily
             // unavailable. Moving a file, unplugging storage, or a transient
             // permission failure must not cascade-delete its annotations.
-            purgeMissingBooks()
+            val inventory = repository.getAllBooksIncludingTrashList()
+            reconcileMissingBooks(inventory)
+            val booksByPath = inventory.associateBy { it.filePath }.toMutableMap()
 
-            val discoveredBooks = mutableListOf<Book>()
+            val discoveredFiles = mutableListOf<File>()
 
             for (root in rootDirs) {
-                scanDirectory(root, discoveredBooks)
+                scanDirectory(root, discoveredFiles)
             }
 
-            Log.i(TAG, "Discovered ${discoveredBooks.size} documents during storage scan")
+            Log.i(TAG, "Discovered ${discoveredFiles.size} documents during storage scan")
 
-            for (book in discoveredBooks) {
-                val existing = repository.getBookByPath(book.filePath)
-                val bookId = if (existing == null) {
-                    repository.insertBook(book)
-                } else {
-                    existing.id
-                }
-                val currentBook = existing ?: book.copy(id = bookId)
-                if (existing == null || currentBook.coverPath.isNullOrBlank() ||
-                    !File(currentBook.coverPath).isFile
-                ) {
-                    coverExtractor.extractAndSaveCover(currentBook)
+            for (file in discoveredFiles) {
+                if (file.absolutePath !in booksByPath) {
+                    val book = indexedBook(file)
+                    val bookId = repository.insertBook(book)
+                    booksByPath[book.filePath] = book.copy(id = bookId)
                 }
             }
+
+            // One pass also repairs covers of books outside the traversed roots.
+            // Trash participates in reconciliation, but is never re-imported or enriched.
+            val metadataEdits = scanPrefs.edit()
+            for (book in booksByPath.values) {
+                if (!book.isTrash) enrichMissingMetadata(book, metadataEdits)
+            }
+            metadataEdits.apply()
 
             // Sync ReadEra collections and reading states if ReadEra folder is present
             if (readEraDir.exists() && readEraDir.isDirectory) {
                 syncReadEraCollectionsAndState(readEraDir)
             }
-
-            // Also check any already stored books
-            extractMissingCovers()
 
             // Keep the automatic categories separate from user-created collections.
             classifyAllBooks()
@@ -157,7 +176,9 @@ class StorageScanner(
                     syncManager.triggerImmediateBackgroundSync()
                 }
             } catch (_: Exception) {}
-            lastScanTimestamp = System.currentTimeMillis()
+            lastScanTimestamp = SystemClock.elapsedRealtime()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Error during storage scan", e)
         } finally {
@@ -166,9 +187,8 @@ class StorageScanner(
         }
     }
 
-    private suspend fun purgeMissingBooks() {
+    private fun reconcileMissingBooks(currentBooks: List<Book>) {
         try {
-            val currentBooks = repository.getAllBooksList()
             for (b in currentBooks) {
                 val f = File(b.filePath)
                 if (!f.exists()) {
@@ -179,8 +199,7 @@ class StorageScanner(
             // Clean up orphan cover files in internal files/covers
             val coversDir = File(context.filesDir, "covers")
             if (coversDir.exists() && coversDir.isDirectory) {
-                val validBooks = repository.getAllBooksList()
-                val validCoverNames = validBooks.mapNotNull { it.coverPath?.let { p -> File(p).name } }.toSet()
+                val validCoverNames = currentBooks.mapNotNull { it.coverPath?.let { p -> File(p).name } }.toSet()
                 coversDir.listFiles()?.forEach { cf ->
                     if (cf.isFile && !validCoverNames.contains(cf.name)) {
                         cf.delete()
@@ -188,7 +207,7 @@ class StorageScanner(
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error purging missing books", e)
+            Log.e(TAG, "Error reconciling unavailable books and covers", e)
         }
     }
 
@@ -410,36 +429,51 @@ class StorageScanner(
         }
     }
 
-    suspend fun extractMissingCovers() = withContext(Dispatchers.IO) {
-        try {
-            val allBooks = repository.getAllBooksList()
-            for (book in allBooks) {
-                if (book.coverPath == null || !File(book.coverPath).exists() || book.author == "Desconocido") {
-                    coverExtractor.extractAndSaveCover(book)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating missing covers", e)
-        }
+    private fun metadataStamp(book: Book): String {
+        val file = File(book.filePath)
+        val coverExists = book.coverPath?.let { File(it).isFile } == true
+        return "${book.filePath}:${file.length()}:${file.lastModified()}:${book.coverPath.orEmpty()}:$coverExists"
+    }
+
+    private suspend fun enrichMissingMetadata(
+        book: Book,
+        edits: android.content.SharedPreferences.Editor
+    ) {
+        val file = File(book.filePath)
+        if (!file.isFile || !file.canRead()) return
+        val needsMetadata = book.author == "Desconocido" || book.author == "Autor desconocido" || book.author.isBlank()
+        val needsCover = book.coverPath?.let { !File(it).isFile } ?: true
+        if (!needsMetadata && !needsCover) return
+        val key = "metadata_attempt_v1_${book.id}"
+        if (scanPrefs.getString(key, null) == metadataStamp(book)) return
+        val enriched = coverExtractor.extractAndSaveCover(book)
+        // A coverless/unsupported document is a completed attempt, not a reason
+        // to parse or hash that same unchanged file on every resume.
+        edits.putString(key, metadataStamp(enriched))
     }
 
     suspend fun classifyBook(book: Book): Book = withContext(Dispatchers.IO) {
-        val categoryIds = ensureAutomaticCategoryCollections()
         val current = repository.getBookByIdSync(book.id) ?: book
-        val enriched = if (current.coverPath == null || !File(current.coverPath).exists()) {
-            coverExtractor.extractAndSaveCover(current)
-        } else {
-            current
-        }
-        applyAutomaticCategory(enriched, categoryIds)
-        repository.getBookByIdSync(enriched.id) ?: enriched
+        val edits = scanPrefs.edit()
+        enrichMissingMetadata(current, edits)
+        edits.apply()
+        // The extractor only fills placeholders in Room; use the persisted
+        // metadata rather than its candidate so user edits drive classification.
+        val enriched = repository.getBookByIdSync(book.id) ?: current
+        val categoryIds = ensureAutomaticCategoryCollections()
+        applyAutomaticCategory(enriched, categoryIds, repository.getCollectionsForBookSync(book.id).map { it.id }.toSet())
+        enriched
     }
 
     private suspend fun classifyAllBooks() {
         val categoryIds = ensureAutomaticCategoryCollections()
-        for (book in repository.getAllBooksList()) {
-            val current = repository.getBookByIdSync(book.id) ?: book
-            applyAutomaticCategory(current, categoryIds)
+        val books = repository.getAllBooksList()
+        val memberships = repository.getAllBookCollectionsSync().groupBy { it.bookId }
+        categoryMutex.withLock {
+            classifiedBooks.keys.retainAll(books.map { it.id }.toSet())
+        }
+        for (book in books) {
+            applyAutomaticCategory(book, categoryIds, memberships[book.id].orEmpty().map { it.collectionId }.toSet())
         }
     }
 
@@ -454,13 +488,30 @@ class StorageScanner(
         return ids
     }
 
-    private suspend fun applyAutomaticCategory(book: Book, categoryIds: Map<DocumentCategory, Long>) {
-        if (book.id == 0L) return
-        val decision = categoryClassifier.classify(book)
-        categoryIds[decision.category]?.let { collectionId ->
-            repository.setAutomaticCategory(book.id, collectionId, categoryIds.values.toList())
+    private suspend fun applyAutomaticCategory(
+        book: Book,
+        categoryIds: Map<DocumentCategory, Long>,
+        memberships: Set<Long>
+    ) = categoryMutex.withLock {
+        if (book.id == 0L) return@withLock
+        val file = File(book.filePath)
+        val inputs = CategoryInputs(
+            book.filePath, file.length(), file.lastModified(), book.title,
+            book.genre, book.series, book.format,
+            DocumentCategoryClassifier.manualCategory(context, book)
+        )
+        val previous = classifiedBooks[book.id]
+        val category = if (previous?.first == inputs) {
+            previous.second
+        } else {
+            categoryClassifier.classify(book).category
         }
-        Log.i(TAG, "Automatic category for '${book.title}': ${decision.category.displayName} (${decision.confidence})")
+        categoryIds[category]?.let { collectionId ->
+            if (collectionId !in memberships || memberships.count { it in categoryIds.values } != 1) {
+                repository.setAutomaticCategory(book.id, collectionId, categoryIds.values.toList())
+            }
+            if (previous?.first != inputs) classifiedBooks[book.id] = inputs to category
+        }
     }
 
     suspend fun scanSingleFile(file: File): Book? = withContext(Dispatchers.IO) {
@@ -468,18 +519,8 @@ class StorageScanner(
         val ext = file.extension.lowercase()
         if (!SUPPORTED_EXTENSIONS.contains(ext)) return@withContext null
 
-        val format = DocumentFormat.fromExtension(ext)
-        val title = file.nameWithoutExtension.replace('_', ' ').trim()
         val existing = repository.getBookByPath(file.absolutePath)
-        val book = existing ?: Book(
-            title = title,
-            author = "Desconocido",
-            filePath = file.absolutePath,
-            format = format.displayName,
-            fileSize = file.length(),
-            status = BookStatus.UNREAD,
-            dateAdded = file.lastModified()
-        )
+        val book = existing ?: indexedBook(file)
 
         val bookId = if (existing == null) {
             repository.insertBook(book)
@@ -490,7 +531,17 @@ class StorageScanner(
         classifyBook(savedBook)
     }
 
-    private fun scanDirectory(dir: File, discovered: MutableList<Book>) {
+    private fun indexedBook(file: File) = Book(
+        title = file.nameWithoutExtension.replace('_', ' ').trim(),
+        author = "Desconocido",
+        filePath = file.absolutePath,
+        format = DocumentFormat.fromExtension(file.extension.lowercase()).displayName,
+        fileSize = file.length(),
+        status = BookStatus.UNREAD,
+        dateAdded = file.lastModified()
+    )
+
+    private fun scanDirectory(dir: File, discovered: MutableList<File>) {
         if (!dir.exists() || !dir.canRead() || dir.name.startsWith(".")) return
 
         // Skip android system cache and app data directories to prevent slow scans
@@ -504,18 +555,7 @@ class StorageScanner(
             } else {
                 val ext = file.extension.lowercase()
                 if (SUPPORTED_EXTENSIONS.contains(ext)) {
-                    val format = DocumentFormat.fromExtension(ext)
-                    val title = file.nameWithoutExtension.replace('_', ' ').trim()
-                    val book = Book(
-                        title = title,
-                        author = "Desconocido",
-                        filePath = file.absolutePath,
-                        format = format.displayName,
-                        fileSize = file.length(),
-                        status = BookStatus.UNREAD,
-                        dateAdded = file.lastModified()
-                    )
-                    discovered.add(book)
+                    discovered.add(file)
                     _scanProgress.value = discovered.size
                 }
             }

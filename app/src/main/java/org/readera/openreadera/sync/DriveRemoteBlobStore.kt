@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.MultipartBody
@@ -19,6 +21,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.FilterInputStream
 import java.io.InputStream
+import org.readera.openreadera.core.io.TransferLimits
 
 internal class DriveRemoteBlobStore(
     private val context: Context,
@@ -26,6 +29,7 @@ internal class DriveRemoteBlobStore(
     private val oauthToken: String?,
     private val targetFolderName: String,
     private val client: OkHttpClient,
+    private val session: DriveAccountGuard.Session,
     private val resolveFolderId: suspend (String) -> String
 ) : DriveBlobStore {
     private val resolver = context.contentResolver
@@ -33,6 +37,7 @@ internal class DriveRemoteBlobStore(
 
     override suspend fun contains(name: String): Boolean {
         requireSafeName(name)
+        session.checkCurrent()
         val folder = safFolder() ?: return findRestFileId(name) != null
         return folder.findFile(name) != null
     }
@@ -44,23 +49,32 @@ internal class DriveRemoteBlobStore(
         expectedSha256: String
     ) {
         requireSafeName(name)
+        session.checkCurrent()
+        val job = currentCoroutineContext()[Job]
         require(name.startsWith("openreadera_blob_"))
         require(expectedSha256.matches(Regex("[0-9a-f]{64}")))
         val folder = safFolder()
         if (folder != null) {
             check(folder.canWrite()) { "La carpeta de Drive no permite escribir" }
-            val temporary = folder.createFile(mimeType, "$name.tmp-${System.nanoTime()}")
-                ?: error("No se pudo crear el archivo temporal en Drive")
+            val temporary = session.commit {
+                folder.createFile(mimeType, "$name.tmp-${System.nanoTime()}")
+                    ?: error("No se pudo crear el archivo temporal en Drive")
+            }
             try {
                 val output = resolver.openOutputStream(temporary.uri, "wt")
                     ?: error("No se pudo abrir el archivo temporal en Drive")
-                output.use { DriveAttachmentPipeline.copyVerified(source, it, expectedSha256) }
-                val existing = folder.findFile(name)
-                if (existing != null) {
-                    check(temporary.delete()) { "No se pudo limpiar el archivo temporal de Drive" }
-                    return
+                output.use { out ->
+                    session.withOutput(out, job) { DriveAttachmentPipeline.copyVerified(source, it, expectedSha256) }
                 }
-                check(temporary.renameTo(name)) { "No se pudo finalizar el archivo en Drive" }
+                session.checkCurrent()
+                session.commit {
+                    val existing = folder.findFile(name)
+                    if (existing != null) {
+                        check(temporary.delete()) { "No se pudo limpiar el archivo temporal de Drive" }
+                    } else {
+                        check(temporary.renameTo(name)) { "No se pudo finalizar el archivo en Drive" }
+                    }
+                }
             } catch (failure: Exception) {
                 temporary.delete()
                 throw failure
@@ -80,7 +94,9 @@ internal class DriveRemoteBlobStore(
             override fun contentType() = mimeType.toMediaType()
             override fun contentLength() = source.size
             override fun writeTo(sink: BufferedSink) {
-                DriveAttachmentPipeline.copyVerified(source, sink.outputStream(), expectedSha256)
+                session.withOutput(sink.outputStream(), job) {
+                    DriveAttachmentPipeline.copyVerified(source, it, expectedSha256)
+                }
             }
         }
         val boundary = "-------OpenReadEraBlobBoundary"
@@ -102,28 +118,32 @@ internal class DriveRemoteBlobStore(
         }
     }
 
-    override suspend fun download(name: String): InputStream? {
+    override suspend fun download(name: String, maxBytes: Long): InputStream? {
         requireSafeName(name)
+        session.checkCurrent()
         val folder = safFolder()
         if (folder != null) {
             val document = folder.findFile(name) ?: return null
+            TransferLimits.checkAdvertised(document.length(), maxBytes)
             return resolver.openInputStream(document.uri)
                 ?: error("No se pudo leer el archivo de Drive")
         }
         val fileId = findRestFileId(name) ?: return null
-        return downloadRestFile(fileId)
+        return downloadRestFile(fileId, maxBytes)
     }
 
-    override suspend fun downloadLegacy(name: String): InputStream? {
+    override suspend fun downloadLegacy(name: String, maxBytes: Long): InputStream? {
         requireSafeName(name)
+        session.checkCurrent()
         val folder = safFolder()
         if (folder != null) {
             val document = folder.findFile(name) ?: return null
+            TransferLimits.checkAdvertised(document.length(), maxBytes)
             return resolver.openInputStream(document.uri)
                 ?: error("No se pudo leer el archivo heredado de Drive")
         }
         val fileId = findRestFileId(name) ?: return null
-        return downloadRestFile(fileId)
+        return downloadRestFile(fileId, maxBytes)
     }
 
     private fun safFolder(): DocumentFile? = safTreeUri?.let {
@@ -154,7 +174,7 @@ internal class DriveRemoteBlobStore(
         }
     }
 
-    private suspend fun downloadRestFile(fileId: String): InputStream {
+    private suspend fun downloadRestFile(fileId: String, maxBytes: Long): InputStream {
         val token = validToken()
         val request = Request.Builder()
             .url("https://www.googleapis.com/drive/v3/files/$fileId?alt=media")
@@ -171,6 +191,12 @@ internal class DriveRemoteBlobStore(
         if (body == null) {
             response.close()
             error("Drive devolvió un archivo vacío")
+        }
+        try {
+            TransferLimits.checkAdvertised(body.contentLength(), maxBytes)
+        } catch (failure: Exception) {
+            response.close()
+            throw failure
         }
         return object : FilterInputStream(body.byteStream()) {
             override fun close() {
@@ -191,8 +217,9 @@ internal class DriveRemoteBlobStore(
     private fun validToken(): String = oauthToken?.takeIf { it.startsWith("ya29") }
         ?: error("No hay una sesión OAuth de Drive activa")
 
+
     private suspend fun execute(request: Request): Response = withContext(Dispatchers.IO) {
-        client.newCall(request).execute()
+        session.execute(client, request)
     }
 
     private fun requireSafeName(name: String) {

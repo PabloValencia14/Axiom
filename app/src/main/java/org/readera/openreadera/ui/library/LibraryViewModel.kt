@@ -1,6 +1,9 @@
 package org.readera.openreadera.ui.library
 
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -26,6 +29,43 @@ internal fun Book.matchesLibraryQuery(query: String): Boolean {
         genre?.contains(needle, ignoreCase = true) == true ||
         description?.contains(needle, ignoreCase = true) == true
 }
+
+@OptIn(FlowPreview::class)
+internal fun Flow<String>.debouncedLibraryQuery(): Flow<String> =
+    debounce { query -> if (query.isBlank()) 0L else 250L }.distinctUntilChanged()
+
+internal fun filterAndSortLibraryBooks(
+    books: List<Book>,
+    filterCriteria: FilterCriteria,
+    searchQuery: String,
+    sortCriterion: SortCriterion,
+    allBookCollections: List<BookCollectionCrossRef>
+): List<Book> {
+    val assignedBookIds = if (filterCriteria.withoutCollection) {
+        allBookCollections.mapTo(HashSet()) { it.bookId }
+    } else {
+        emptySet()
+    }
+    val query = searchQuery.trim()
+    val targetBooks = if (filterCriteria.isEmpty && query.isEmpty()) books else books.filter { book ->
+        (filterCriteria.activeFormats.isEmpty() || book.format.uppercase() in filterCriteria.activeFormats) &&
+            (!filterCriteria.withoutAuthor || book.author.isBlank() || book.author == "Autor desconocido" || book.author == "Desconocido") &&
+            (!filterCriteria.withoutSeries || book.series.isNullOrBlank()) &&
+            (!filterCriteria.withoutCollection || book.id !in assignedBookIds) &&
+            (!filterCriteria.unreadOnly || (!book.isHaveRead && book.currentPage == 0)) &&
+            book.matchesLibraryQuery(query)
+    }
+    return when (sortCriterion) {
+        SortCriterion.NAME -> targetBooks.sortedWith { a, b -> a.title.compareTo(b.title, ignoreCase = true) }
+        SortCriterion.FILE_NAME -> targetBooks.map { it to File(it.filePath).name }
+            .sortedWith { a, b -> a.second.compareTo(b.second, ignoreCase = true) }.map { it.first }
+        SortCriterion.FILE_FORMAT -> targetBooks.sortedWith { a, b -> a.format.compareTo(b.format, ignoreCase = true) }
+        SortCriterion.FILE_SIZE -> targetBooks.sortedWith { a, b -> b.fileSize.compareTo(a.fileSize) }
+        SortCriterion.DATE_MODIFIED -> targetBooks.sortedWith { a, b -> b.dateAdded.compareTo(a.dateAdded) }
+        SortCriterion.DATE_READ -> targetBooks.sortedWith { a, b -> b.lastOpened.compareTo(a.lastOpened) }
+    }
+}
+
 
 
 enum class LibrarySection(val title: String) {
@@ -174,6 +214,7 @@ data class LibraryUiState(
     val scanCount: Int = 0
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModel(
     private val repository: BookRepository,
     private val scanner: StorageScanner
@@ -191,7 +232,7 @@ class LibraryViewModel(
     private val _selectedFormat = MutableStateFlow<FormatItem?>(null)
     private val _selectedFolder = MutableStateFlow<FolderItem?>(null)
 
-    val uiState: StateFlow<LibraryUiState> = combine(
+    private val libraryResults: Flow<LibraryUiState> = combine(
         repository.getAllBooks().distinctUntilChanged()
             .map { books -> books to deriveLibraryBookGroups(books) }
             .flowOn(Dispatchers.Default),
@@ -203,7 +244,7 @@ class LibraryViewModel(
         _currentSection,
         _sortCriterion,
         _filterCriteria,
-        _searchQuery,
+        _searchQuery.debouncedLibraryQuery(),
         _isSearchOpen,
         combine(
             _selectedAuthor,
@@ -213,7 +254,8 @@ class LibraryViewModel(
             _selectedFolder
         ) { a, s, c, f, fol -> DrilldownState(a, s, c, f, fol) },
         scanner.isScanning
-    ) { args: Array<Any?> ->
+    ) { args: Array<Any?> -> args }.mapLatest { args ->
+        withContext(Dispatchers.Default) {
         @Suppress("UNCHECKED_CAST")
         val activeBooksAndGroups = args[0] as Pair<List<Book>, LibraryBookGroups>
         val (allActiveBooks, bookGroups) = activeBooksAndGroups
@@ -276,40 +318,10 @@ class LibraryViewModel(
             }
         }
 
-        // Apply filters
-        if (!filterCriteria.isEmpty) {
-            if (filterCriteria.activeFormats.isNotEmpty()) {
-                targetBooks = targetBooks.filter { filterCriteria.activeFormats.contains(it.format.uppercase()) }
-            }
-            if (filterCriteria.withoutAuthor) {
-                targetBooks = targetBooks.filter { it.author.isBlank() || it.author == "Autor desconocido" }
-            }
-            if (filterCriteria.withoutSeries) {
-                targetBooks = targetBooks.filter { it.series.isNullOrBlank() }
-            }
-            if (filterCriteria.withoutCollection) {
-                val assignedBookIds = allBookCollections.map { it.bookId }.toSet()
-                targetBooks = targetBooks.filter { it.id !in assignedBookIds }
-            }
-            if (filterCriteria.unreadOnly) {
-                targetBooks = targetBooks.filter { !it.isHaveRead && it.currentPage == 0 }
-            }
-        }
 
-        // Apply search query
-        if (searchQuery.isNotBlank()) {
-            targetBooks = targetBooks.filter { it.matchesLibraryQuery(searchQuery) }
-        }
-
-        // Apply sorting
-        targetBooks = when (sortCriterion) {
-            SortCriterion.NAME -> targetBooks.sortedBy { it.title.lowercase() }
-            SortCriterion.FILE_NAME -> targetBooks.sortedBy { File(it.filePath).name.lowercase() }
-            SortCriterion.FILE_FORMAT -> targetBooks.sortedBy { it.format.lowercase() }
-            SortCriterion.FILE_SIZE -> targetBooks.sortedByDescending { it.fileSize }
-            SortCriterion.DATE_MODIFIED -> targetBooks.sortedByDescending { it.dateAdded }
-            SortCriterion.DATE_READ -> targetBooks.sortedByDescending { it.lastOpened }
-        }
+        targetBooks = filterAndSortLibraryBooks(
+            targetBooks, filterCriteria, searchQuery, sortCriterion, allBookCollections
+        )
 
         LibraryUiState(
             currentSection = currentSection,
@@ -347,6 +359,12 @@ class LibraryViewModel(
             isScanning = isScanning,
             scanCount = allActiveBooks.size
         )
+        }
+    }
+
+    // Keep text-field edits immediate; only matching waits for the quiet period.
+    val uiState: StateFlow<LibraryUiState> = combine(libraryResults, _searchQuery) { state, query ->
+        state.copy(searchQuery = query)
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),

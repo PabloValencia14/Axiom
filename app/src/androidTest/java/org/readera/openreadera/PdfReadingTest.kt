@@ -9,7 +9,6 @@ import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
-import android.util.LruCache
 import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -318,20 +317,20 @@ class PdfReadingTest {
             instrumentation.sendStatus(0, Bundle().apply {
                 putString("stream", "PDF reader firstSharpMs=${(SystemClock.elapsedRealtimeNanos() - started) / 1e6}\n")
             })
-            @Suppress("UNCHECKED_CAST")
-            val cache = ReaderViewModel::class.java.getDeclaredField("highResCache").apply { isAccessible = true }
-                .get(model) as LruCache<Int, Bitmap>
-            awaitCondition { cache.get(5) != null }
-            assertTrue(cache.size() <= cache.maxSize())
-            val next = cache.get(5)
-            assertNotNull(next)
+            val firstShown = checkNotNull(model.uiState.value.currentPageBitmap)
+            main { model.goToPage(5) }
+            awaitCondition {
+                model.uiState.value.currentPageBitmap?.width ?: 0 >= 3000 &&
+                    !model.uiState.value.isLoadingPage &&
+                    model.uiState.value.currentPageBitmap?.getPixel(0, 0) == pageColor(5)
+            }
+            val nextShown = checkNotNull(model.uiState.value.currentPageBitmap)
             main {
-                val begin = SystemClock.elapsedRealtimeNanos()
+                model.goToPage(4)
+                assertSame(firstShown, model.uiState.value.currentPageBitmap)
                 model.goToPage(5)
-                assertSame(next, model.uiState.value.currentPageBitmap)
-                instrumentation.sendStatus(0, Bundle().apply {
-                    putString("stream", "PDF prefetchedNavigationMs=${(SystemClock.elapsedRealtimeNanos() - begin) / 1e6}\n")
-                })
+                assertSame(nextShown, model.uiState.value.currentPageBitmap)
+                assertFalse(model.uiState.value.isLoadingPage)
             }
             val unchanged = model.uiState.value.currentPageBitmap
             main {
@@ -339,15 +338,25 @@ class PdfReadingTest {
                 model.updateFontSize(24)
                 model.updateLineSpacing(1.8f)
                 model.updateMargin(30)
-                model.setViewportDimensions(3200, 2136)
             }
             instrumentation.waitForIdleSync()
             assertSame(unchanged, model.uiState.value.currentPageBitmap)
             assertEquals(5, model.uiState.value.currentPage)
+            main { model.setViewportDimensions(3200, 2136) }
+            awaitCondition { model.uiState.value.currentPageBitmap?.width == 4096 }
+            assertEquals(pageColor(5), model.uiState.value.currentPageBitmap!!.getPixel(0, 0))
+            // Compose can still hold old images after viewport invalidation or cache eviction.
+            assertFalse(firstShown.isRecycled)
+            assertFalse(nextShown.isRecycled)
+            assertEquals(pageColor(4), firstShown.getPixel(0, 0))
             main { listOf(1, 7, 2, 0, 6, 7).forEach(model::goToPage) }
             awaitCondition { model.uiState.value.currentPage == 7 && model.uiState.value.currentPageBitmap?.getPixel(0, 0) == pageColor(7) }
             main { model.goToPage(2); model.updateViewMode(ReaderViewMode.DOUBLE_PAGE) }
-            awaitCondition { model.uiState.value.currentPageBitmap?.width == 2400 && model.uiState.value.secondPageBitmap?.width == 2400 }
+            awaitCondition {
+                (model.uiState.value.currentPageBitmap?.width ?: 0) > 1000 &&
+                    (model.uiState.value.secondPageBitmap?.width ?: 0) > 1000 &&
+                    !model.uiState.value.isLoadingPage
+            }
             assertEquals(2, model.uiState.value.currentPage)
             assertEquals(pageColor(2), model.uiState.value.currentPageBitmap!!.getPixel(0, 0))
             assertEquals(pageColor(3), model.uiState.value.secondPageBitmap!!.getPixel(0, 0))

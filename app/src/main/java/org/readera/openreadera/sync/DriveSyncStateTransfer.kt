@@ -5,10 +5,12 @@ import org.readera.openreadera.data.db.AppDatabase
 import org.readera.openreadera.data.model.Book
 import org.readera.openreadera.data.model.BookSyncIdentity
 import java.io.File
+import org.readera.openreadera.data.importer.DocumentLocationPolicy
 
 internal class DriveSyncStateTransfer(
     private val database: AppDatabase,
-    private val attachments: DriveAttachmentPipeline
+    private val attachments: DriveAttachmentPipeline,
+    private val locations: DocumentLocationPolicy
 ) {
     suspend fun restoreRemoteAttachments(remoteState: JSONObject): JSONObject =
         rehydrateRemoteAttachments(
@@ -26,14 +28,14 @@ internal class DriveSyncStateTransfer(
         for (book in books) {
             val previous = remoteAttachments[BookSyncIdentity.of(book)]
                 ?: remoteAttachments[BookSyncIdentity.legacy(book)]
-            val bookFile = book.filePath.takeIf(String::isNotBlank)?.let(::File)?.takeIf(File::isFile)
-            val coverFile = book.coverPath?.let(::File)?.takeIf(File::isFile)
+            val bookFile = book.filePath.takeIf(String::isNotBlank)?.let(::File)?.let(locations::uploadDocument)
+            val coverFile = book.coverPath?.let(::File)?.let(locations::uploadCover)
             val bookRef = if (bookFile != null) {
                 attachments.upload(DriveAttachmentPipeline.source(bookFile))
-            } else previous?.book
+            } else if (book.filePath.isBlank() || !File(book.filePath).exists()) previous?.book else null
             val coverRef = if (coverFile != null) {
                 attachments.upload(DriveAttachmentPipeline.source(coverFile))
-            } else previous?.cover
+            } else if (book.coverPath.isNullOrBlank() || !File(book.coverPath).exists()) previous?.cover else null
             result[book.id] = BookAttachmentRefs(bookRef, coverRef)
         }
         return result

@@ -173,9 +173,9 @@ class DriveSyncSnapshotTest {
             blobs[name] = output.toByteArray()
         }
 
-        override suspend fun download(name: String) = blobs[name]?.inputStream()
+        override suspend fun download(name: String, maxBytes: Long) = blobs[name]?.inputStream()
 
-        override suspend fun downloadLegacy(name: String) = blobs[name]?.inputStream()
+        override suspend fun downloadLegacy(name: String, maxBytes: Long) = blobs[name]?.inputStream()
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

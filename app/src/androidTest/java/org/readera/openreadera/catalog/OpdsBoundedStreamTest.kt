@@ -1,5 +1,7 @@
 package org.readera.openreadera.catalog
 
+import org.readera.openreadera.core.io.copyBounded
+
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
