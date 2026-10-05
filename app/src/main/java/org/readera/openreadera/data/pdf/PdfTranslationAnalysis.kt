@@ -75,6 +75,8 @@ internal class PdfShow(
     var previousGlyph: Matrix? = null
     var previousAdvance = 0f
     var visible = false
+    val renderingMode get() = state.textState.renderingMode.intValue()
+    var strokeExpansion = 0f
     val location get() = "${container.id}/operator ${operation.index}"
 }
 
@@ -287,7 +289,23 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
             show.text.append(unicode)
             return
         }
-        if (textState.renderingMode.intValue() != 0) rejectPdf("Stroked text cannot be fitted without changing its ink", show.location)
+        val renderingMode = textState.renderingMode.intValue()
+        if (renderingMode !in 0..2) rejectPdf("Unsupported native text rendering mode", show.location)
+        if (renderingMode != 0) {
+            if (state.strokingColor.patternName != null)
+                rejectPdf("Pattern-stroked text is unsupported", show.location)
+            val ctm = state.currentTransformationMatrix
+            val textScale = minOf(kotlin.math.hypot(textMatrix.scaleX, textMatrix.shearY),
+                kotlin.math.hypot(textMatrix.shearX, textMatrix.scaleY)) * textState.fontSize
+            val ctmScale = maxOf(kotlin.math.hypot(ctm.scaleX, ctm.shearY),
+                kotlin.math.hypot(ctm.shearX, ctm.scaleY))
+            val expansion = state.lineWidth * ctmScale * state.miterLimit / (2f * textScale)
+            if (!expansion.isFinite() || expansion < 0f)
+                rejectPdf("Text stroke geometry cannot be bounded safely", show.location)
+            show.strokeExpansion = maxOf(show.strokeExpansion, expansion)
+        }
+        val ctm = state.currentTransformationMatrix
+        val ctmScale = maxOf(kotlin.math.hypot(ctm.scaleX, ctm.shearY), kotlin.math.hypot(ctm.shearX, ctm.scaleY))
         if (state.softMask != null || state.blendMode != BlendMode.NORMAL || state.nonStrokeAlphaConstant != 1.0 ||
             state.alphaConstant != 1.0 || state.isAlphaSource || state.isOverprint || state.isNonStrokingOverprint || state.transfer != null)
             rejectPdf("Text transparency, overprint or transfer is not representable safely", show.location)
@@ -295,7 +313,8 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
         if (textState.fontSize <= 0f || !textState.fontSize.isFinite() || textState.horizontalScaling != 100f ||
             !orthogonalPdfMatrix(textMatrix) || !orthogonalPdfMatrix(state.currentTransformationMatrix))
             rejectPdf("Oblique, compressed or singular text geometry is unsupported", show.location)
-        if (state.nonStrokingColor.patternName != null) rejectPdf("Pattern-colored text is unsupported", show.location)
+        if (renderingMode != 1 && state.nonStrokingColor.patternName != null)
+            rejectPdf("Pattern-colored text is unsupported", show.location)
         val localMatrix = Matrix(textState.fontSize,0f,0f,textState.fontSize,0f,textState.rise).multiply(textMatrix)
         val outline = pdfGlyphPath(font, code, show.location)
         outline.transform(pdfAndroidMatrix(font.fontMatrix))
@@ -305,6 +324,11 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
         outline.transform(pdfAndroidMatrix(matrix))
         val bounds = RectF(); outline.computeBounds(bounds, true)
         if (!bounds.isEmpty) {
+            if (show.strokeExpansion > 0f) {
+                localBounds.inset(-show.strokeExpansion, -show.strokeExpansion)
+                val pageExpansion = state.lineWidth * ctmScale * state.miterLimit / 2f
+                bounds.inset(-pageExpansion, -pageExpansion)
+            }
             val probe = Region(floor(bounds.left).toInt(),floor(bounds.top).toInt(),ceil(bounds.right).toInt(),ceil(bounds.bottom).toInt())
             probe.op(state.currentClippingPath, Region.Op.DIFFERENCE)
             if (!probe.isEmpty) rejectPdf("Text ink crosses a page or Form clipping boundary", show.location)

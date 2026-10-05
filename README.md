@@ -16,6 +16,7 @@ La traducción completa, cuando se solicita, envía texto nativo de las páginas
 - MOBI/AZW/AZW3 requieren documentos sin DRM y conversión válida; no se elimina ni evade DRM.
 - CBZ está implementado; CBR, DOC, RTF, DJV/DJVU y CHM no tienen motor de lectura en esta versión, aunque aparezcan como formatos reconocidos por la aplicación.
 - La firma PDF solo dibuja una marca visual en una copia; no incorpora certificado, identidad verificada ni validación criptográfica.
+- La traducción de PDF conserva texto nativo con relleno, trazo o ambos, junto con sus colores y el estado gráfico de trazo. Rechaza texto con recorte, patrones de color u otra geometría que no pueda conservar con seguridad; el original nunca se sustituye.
 - La sincronización y servicios remotos dependen de credenciales, red y disponibilidad de terceros; la copia local sigue siendo independiente.
 - El escaneo automático agrupa el inventario, conserva metadatos existentes, anotaciones y documentos en la papelera, y se limita a uno cada 30 segundos al reanudar la app; la actualización explícita sigue disponible de inmediato.
 - La búsqueda, los filtros y el ordenamiento de la biblioteca se calculan fuera del hilo principal; solo la coincidencia de texto usa un debounce de 250 ms.

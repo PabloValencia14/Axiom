@@ -38,6 +38,54 @@ class PdfDocumentTranslatorTest {
     private val context get() = RuntimeEnvironment.getApplication()
     private val font get() = PDType1Font.HELVETICA
 
+    @Test fun strokeAndFillStrokeModesRetainTheirInkAndFollowingDependentText() = runBlocking {
+        withFiles { source,output,expected,graphics ->
+            val prefix="q 1.5 w 1 J 2 j 8 M [3 2] 0 d 1 0 0 RG 0 0 1 rg 1.5 0 0 1 1 0 cm "
+            val suffix="(9) Tj ET Q"
+            val lastX=40f+font.getStringWidth("Fill stroke.")*12f/1000f
+            simple(expected,prefix+"BT /F1 12 Tf 1 0 0 1 40 220 Tm 1 Tr (Texto.) Tj ET " +
+                "BT /F1 12 Tf 1 0 0 1 40 150 Tm 2 Tr (Uno.) Tj 1 0 0 1 $lastX 150 Tm (9) Tj ET Q")
+            simple(source,prefix+"BT /F1 12 Tf 1 0 0 1 40 220 Tm 1 Tr (Stroke prose.) Tj " +
+                "1 0 0 1 40 150 Tm 2 Tr (Fill stroke.) Tj "+suffix)
+            simple(graphics,prefix+"Q")
+            val original=source.readBytes()
+            val calls=mutableListOf<String>()
+            PdfDocumentTranslator(context).translateCopy(source,output,"es",{ text,_ ->
+                calls+=text; Result.success(if (text=="Stroke prose.") "Texto." else "Uno.")
+            },{ _,_ -> })
+            assertEquals(listOf("Stroke prose.","Fill stroke."),calls)
+            assertOutput(source,output,expected,graphics,listOf("Texto.","Uno.","9"),listOf("Stroke prose.","Fill stroke."),allowFontRasterVariance=true)
+            assertArrayEquals(original,source.readBytes())
+            PDDocument.load(output).use { document ->
+                assertTrue(PDFTextStripper().getText(document).contains("Texto."))
+                val operations=parsePdfOperations(com.tom_roush.pdfbox.pdfparser.PDFStreamParser(document.getPage(0)))
+                assertTrue(operations.any { it.operator.name=="Tr" && (it.operands.single() as COSNumber).intValue()==1 })
+                assertTrue(operations.any { it.operator.name=="Tr" && (it.operands.single() as COSNumber).intValue()==2 })
+                assertTrue(operations.any { it.operator.name=="RG" } && operations.any { it.operator.name=="rg" })
+
+            }
+        }
+    }
+    @Test fun changedDashStateSeparatesAdjacentStrokedRunsAndKeepsFollowingAdvance() = runBlocking {
+        withFiles { source,output,expected,graphics ->
+            val prefix="q .5 w 1 J 0 j 2 M [2 1] 0 d 1 0 0 RG "
+            val lastX=40f+font.getStringWidth("Source beta.")*12f/1000f
+            simple(source,prefix+"BT /F1 12 Tf 1 0 0 1 40 220 Tm 1 Tr (Source alpha.) Tj [3 1] 0 d " +
+                "1 0 0 1 40 200 Tm (Source beta.) Tj (9) Tj ET Q")
+            simple(expected,prefix+"BT /F1 12 Tf 1 0 0 1 40 220 Tm 1 Tr (Uno.) Tj ET [3 1] 0 d " +
+                "BT /F1 12 Tf 1 0 0 1 40 200 Tm 1 Tr (Dos.) Tj 1 0 0 1 $lastX 200 Tm (9) Tj ET Q")
+            simple(graphics,"q Q")
+            val original=source.readBytes()
+            val calls=mutableListOf<String>()
+            PdfDocumentTranslator(context).translateCopy(source,output,"es",{ text,_ ->
+                calls+=text; Result.success(if (text=="Source alpha.") "Uno." else "Dos.")
+            },{ _,_ -> })
+            assertEquals(listOf("Source alpha.","Source beta."),calls)
+            assertOutput(source,output,expected,graphics,listOf("Uno.","Dos.","9"),listOf("Source alpha.","Source beta."),allowFontRasterVariance=true)
+            assertArrayEquals(original,source.readBytes())
+        }
+    }
+
     @Test fun columnsHeadingBackgroundImageVectorAndOcclusionPreserveInkAndGeometry() = runBlocking {
         withFiles { source, output, expected, graphics ->
             columns(source,0); columns(expected,1); columns(graphics,2)

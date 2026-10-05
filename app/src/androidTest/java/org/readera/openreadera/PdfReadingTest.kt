@@ -405,6 +405,17 @@ class PdfReadingTest {
                     stream.setLineWidth(2f)
                     stream.moveTo(188f, 205f); stream.lineTo(242f, 245f); stream.stroke()
                     stream.setNonStrokingColor(.1f, .2f, .4f)
+                    stream.setStrokingColor(.8f, .1f, .1f)
+                    stream.setLineWidth(.8f)
+                    stream.setMiterLimit(2f)
+                    stream.beginText()
+                    stream.setFont(PDType1Font.HELVETICA, 12f)
+                    stream.setRenderingMode(com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode.STROKE)
+                    stream.newLineAtOffset(34f, 392f); stream.showText("Stroked heading.")
+                    stream.setRenderingMode(com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode.FILL_STROKE)
+                    stream.newLineAtOffset(0f, -20f); stream.showText("Fill stroke heading.")
+                    stream.endText()
+                    stream.setRenderingMode(com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode.FILL)
                     stream.beginText()
                     stream.setFont(PDType1Font.HELVETICA, 12f)
                     stream.newLineAtOffset(34f, 345f); stream.showText("Spanning heading.")
@@ -451,8 +462,9 @@ class PdfReadingTest {
             translate = { text, language ->
                 assertEquals("es", language)
                 calls += text
-                Result.success(
-                    when (text) {
+                Result.success(when (text) {
+                        "Stroked heading." -> "Trazo."
+                        "Fill stroke heading." -> "Relleno."
                         "Spanning heading." -> "Titulo."
                         "Left paragraph first. Left paragraph next." -> "Texto izquierdo."
                         "Right paragraph first. Right paragraph next." -> "Texto derecho."
@@ -462,7 +474,8 @@ class PdfReadingTest {
             },
             onProgress = { _, _ -> }
         )
-        assertEquals(listOf("Spanning heading.", "Left paragraph first. Left paragraph next.", "Right paragraph first. Right paragraph next."), calls)
+        assertEquals(listOf("Stroked heading.", "Fill stroke heading.", "Spanning heading.",
+            "Left paragraph first. Left paragraph next.", "Right paragraph first. Right paragraph next."), calls)
         assertEquals("pdf", translated.extension)
         assertArrayEquals(originalBytes, source.readBytes())
         assertArrayEquals(sourceHash, MessageDigest.getInstance("SHA-256").digest(source.readBytes()))
@@ -478,6 +491,8 @@ class PdfReadingTest {
             assertTrue(reopened.renderPage(0, rendered, RenderOptions()))
             val text = reopened.getPageText(0)
             assertTrue(text, text.contains("Titulo."))
+            assertTrue(text, text.contains("Trazo."))
+            assertTrue(text, text.contains("Relleno."))
             assertTrue(text, text.contains("Texto izquierdo."))
             assertTrue(text, text.contains("Texto derecho."))
             assertFalse(text, text.contains("Left paragraph first."))
@@ -488,7 +503,7 @@ class PdfReadingTest {
             val scaleX = old.width.toFloat() / 440f
             val scaleY = old.height.toFloat() / 420f
             val textZones = listOf(
-                android.graphics.RectF(0f, 35f, 230f, 165f),
+                android.graphics.RectF(0f, 10f, 230f, 165f),
                 android.graphics.RectF(245f, 95f, 440f, 145f)
             ).map { android.graphics.Rect((it.left * scaleX).toInt(), (it.top * scaleY).toInt(), (it.right * scaleX).toInt(), (it.bottom * scaleY).toInt()) }
             for (y in 0 until rendered.height step 3) for (x in 0 until rendered.width step 3) {

@@ -85,8 +85,13 @@ internal fun groupPdfParagraphs(root: PdfContainer, rules: List<PdfRule> = root.
             val first = paragraph.first
             val ts = show.state.textState; val fs = first.state.textState
             if (show.epoch != first.epoch || ts.font != fs.font || ts.fontSize != fs.fontSize || ts.rise != fs.rise ||
+                show.renderingMode != first.renderingMode ||
                 show.state.currentTransformationMatrix != first.state.currentTransformationMatrix ||
-                show.state.nonStrokingColor != first.state.nonStrokingColor) false
+                show.state.nonStrokingColor != first.state.nonStrokingColor ||
+                (show.renderingMode != 0 && (show.state.strokingColor != first.state.strokingColor ||
+                    show.state.lineWidth != first.state.lineWidth || show.state.lineCap != first.state.lineCap ||
+                    show.state.lineJoin != first.state.lineJoin || show.state.miterLimit != first.state.miterLimit ||
+                    show.state.lineDashPattern != first.state.lineDashPattern))) false
             else {
                 val p = paragraph.baseline(show)
                 val last = paragraph.shows.last()
@@ -228,7 +233,18 @@ internal fun fitPdfParagraph(paragraph: PdfParagraph, translation: String, font:
         for (leadingStep in 0..10) {
             val leading = originalLeading*(1f-(1f-policy.minLeadingScale)*leadingStep/10f)
             if (lines.size>1 && leading < size*1.05f) continue
-            val inks = lines.mapIndexed { index,line -> pdfTextInk(font,line,size,location).apply { offset(0f,-index*leading+paragraph.first.state.textState.rise) } }
+            val strokeExpansion = if (paragraph.first.renderingMode == 0) 0f else {
+                val state = paragraph.first.state
+                val matrix = state.currentTransformationMatrix
+                val ctmScale = maxOf(kotlin.math.hypot(matrix.scaleX,matrix.shearY),kotlin.math.hypot(matrix.shearX,matrix.scaleY))
+                val basis = paragraph.basis
+                val basisScale = minOf(kotlin.math.hypot(basis.scaleX,basis.shearY),kotlin.math.hypot(basis.shearX,basis.scaleY))
+                state.lineWidth * ctmScale * state.miterLimit / (2f * basisScale * size)
+            }
+            val inks = lines.mapIndexed { index,line -> pdfTextInk(font,line,size,location).apply {
+                offset(0f,-index*leading+paragraph.first.state.textState.rise)
+                if (strokeExpansion > 0f) inset(-strokeExpansion,-strokeExpansion)
+            } }
             if (inks.filterNot { it.isEmpty }.any { !envelope.contains(it) }) continue
             if (inks.zipWithNext().any { (a,b) -> RectF.intersects(a,b) }) continue
             return PdfFittedParagraph(paragraph,font,size,leading,lines,inks)

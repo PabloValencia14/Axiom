@@ -144,7 +144,8 @@ class PdfDocumentTranslator(context: Context) {
                         }
                     }
                     sourceShows.filter { it !in replacement.paragraph.shows && it.visible }.forEach { neighbor ->
-                        if (RectF.intersects(ink,neighbor.pageInk)) rejectPdf("Translated ink collides with neighboring native text",show.location)
+                        if (RectF.intersects(ink,neighbor.pageInk))
+                            rejectPdf("Translated ink collides with neighboring native text",show.location)
                     }
                 }
             }
@@ -201,7 +202,7 @@ class PdfDocumentTranslator(context: Context) {
         op("ET"); op("q"); op("BT")
         op("Tf",container.resources.add(fitted.font),COSFloat(fitted.size))
         op("Tc",COSFloat(0f)); op("Tw",COSFloat(0f)); op("Tz",COSFloat(100f))
-        op("Ts",COSFloat(first.state.textState.rise)); op("Tr",COSInteger.ZERO)
+        op("Ts",COSFloat(first.state.textState.rise)); op("Tr",COSInteger.get(first.renderingMode.toLong()))
         fitted.lines.forEachIndexed { index,line ->
             val matrix = paragraph.basis.clone().apply { concatenate(Matrix.getTranslateInstance(0f,-index*fitted.leading)) }
             op("Tm",*matrixValues(matrix))
