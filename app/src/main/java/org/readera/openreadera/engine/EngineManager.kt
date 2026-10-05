@@ -7,6 +7,7 @@ class EngineManager(private val context: Context) {
 
     companion object {
         private const val TAG = "EngineManager"
+        private val FICTIONBOOK_ROOT = Regex("""<\s*(?:[A-Za-z_][\w.-]*:)?fictionbook\b""", RegexOption.IGNORE_CASE)
     }
 
 
@@ -24,7 +25,7 @@ class EngineManager(private val context: Context) {
                 return DocumentFormat.PDF
             }
 
-            if (read >= 68 && header.sliceArray(60..67).toString(Charsets.US_ASCII) == "BOOKMOBI") {
+            if (read >= 68 && String(header, 60, 8, Charsets.US_ASCII) == "BOOKMOBI") {
                 return when (extensionFormat) {
                     DocumentFormat.AZW -> DocumentFormat.AZW
                     DocumentFormat.AZW3 -> DocumentFormat.AZW3
@@ -68,27 +69,56 @@ class EngineManager(private val context: Context) {
                 }
             }
 
-            if (extensionFormat != DocumentFormat.UNKNOWN) return extensionFormat
-
             val xmlHeader = ByteArray(4096)
             val xmlLength = java.io.FileInputStream(file).use { it.read(xmlHeader) }
             if (xmlLength > 0) {
-                val prefix = xmlHeader.copyOf(xmlLength).toString(Charsets.UTF_8)
-                if (Regex("""<\s*fictionbook\b""", RegexOption.IGNORE_CASE).containsMatchIn(prefix)) {
+                val xmlCharset = when {
+                    xmlLength >= 2 && xmlHeader[0] == 0xFF.toByte() && xmlHeader[1] == 0xFE.toByte() -> Charsets.UTF_16LE
+                    xmlLength >= 2 && xmlHeader[0] == 0xFE.toByte() && xmlHeader[1] == 0xFF.toByte() -> Charsets.UTF_16BE
+                    xmlLength >= 2 && xmlHeader[0] == '<'.code.toByte() && xmlHeader[1] == 0.toByte() -> Charsets.UTF_16LE
+                    xmlLength >= 2 && xmlHeader[0] == 0.toByte() && xmlHeader[1] == '<'.code.toByte() -> Charsets.UTF_16BE
+                    else -> Charsets.UTF_8
+                }
+                val prefix = String(xmlHeader, 0, xmlLength, xmlCharset)
+                if (FICTIONBOOK_ROOT.containsMatchIn(prefix)) {
                     return DocumentFormat.FB2
                 }
             }
+            val signature = String(header, 0, read.coerceAtLeast(0), Charsets.ISO_8859_1)
+            if (signature.startsWith("AT&TFORM")) return DocumentFormat.DJVU
+            if (signature.startsWith("{\\rtf")) return DocumentFormat.RTF
+            if (signature.startsWith("ITSF")) return DocumentFormat.CHM
+            if (signature.startsWith("Rar!")) return DocumentFormat.CBR
+            if (read >= 4 && header[0] == 0xD0.toByte() && header[1] == 0xCF.toByte() &&
+                header[2] == 0x11.toByte() && header[3] == 0xE0.toByte()
+            ) return DocumentFormat.DOC
+            if (signature.startsWith("\u0089PNG") || signature.startsWith("GIF8") ||
+                (read >= 2 && header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte()) ||
+                (read >= 12 && signature.startsWith("RIFF") && signature.substring(8).startsWith("WEBP"))
+            ) return DocumentFormat.UNKNOWN
+            val extension = file.extension.lowercase()
+            if (extension == "txt" || extension == "md" || extension == "log") return DocumentFormat.TXT
+            // Container formats require their native signature, not just a renamed suffix.
+            when (extensionFormat) {
+                DocumentFormat.PDF, DocumentFormat.EPUB, DocumentFormat.DOCX, DocumentFormat.FB2,
+                DocumentFormat.MOBI, DocumentFormat.AZW, DocumentFormat.AZW3 -> return DocumentFormat.UNKNOWN
+                else -> Unit
+            }
         } catch (_: Exception) {
-            return null
+            return DocumentFormat.UNKNOWN
         }
         return extensionFormat.takeIf { it != DocumentFormat.UNKNOWN }
     }
+    fun resolveDocumentFormat(path: String): DocumentFormat =
+        detectFormatFromFile(path) ?: when (java.io.File(path).extension.lowercase()) {
+            "md", "log" -> DocumentFormat.TXT
+            else -> DocumentFormat.fromPath(path)
+        }
+
 
     fun getEngineForDocument(path: String): DocumentEngine {
-        val detected = detectFormatFromFile(path)
-        val format = detected ?: DocumentFormat.fromPath(path)
-        val extension = path.substringAfterLast('.', "").lowercase()
-        Log.i(TAG, "Resolving engine for format: $format at $path (detectedByBytes=${detected != null})")
+        val format = resolveDocumentFormat(path)
+        Log.i(TAG, "Resolving engine for format: $format at $path")
 
         return when (format) {
             DocumentFormat.EPUB -> EpubEngine()
@@ -98,10 +128,7 @@ class EngineManager(private val context: Context) {
             DocumentFormat.DOCX -> DocxEngine(context)
             DocumentFormat.MOBI, DocumentFormat.AZW, DocumentFormat.AZW3 -> MobiEpubEngine(context)
             DocumentFormat.CBZ -> CbzEngine()
-            DocumentFormat.UNKNOWN -> when (extension) {
-                "md", "log" -> TxtEngine()
-                else -> UnsupportedDocumentEngine(format)
-            }
+            DocumentFormat.UNKNOWN -> UnsupportedDocumentEngine(format)
             else -> UnsupportedDocumentEngine(format)
         }
     }

@@ -1,0 +1,31 @@
+Bundled fonts for native PDF translation (no runtime downloads or Android system-font dependency)
+
+Liberation Sans and Liberation Serif, version 2.1.5
+Regular, Bold, Italic and BoldItalic: original static TrueType files, unchanged.
+Official release: https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5
+Official binary archive linked by that release:
+https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz
+(The commonly cited /releases/download/2.1.5/... URL returns 404; the release has no GitHub release assets.)
+License and copyright: Liberation-LICENSE.txt, copied verbatim from the archive (SIL OFL 1.1).
+Digitized data copyright (c) 2010 Google Corporation; Reserved Font Names Arimo, Tinos and Cousine.
+Copyright (c) 2012 Red Hat, Inc.; Reserved Font Name Liberation.
+
+Droid Sans Fallback, regular-only static TrueType, unchanged.
+Pinned AOSP source: https://android.googlesource.com/platform/frameworks/base/+/0c953f6/data/fonts/DroidSansFallback.ttf
+Original notice/license: https://android.googlesource.com/platform/frameworks/base/+/0c953f6/data/fonts/NOTICE
+Copyright (c) 2005-2008, The Android Open Source Project. Apache License 2.0.
+Full original notice and Apache license: DroidSansFallback-NOTICE.txt.
+Unified CJK glyphs use the original Droid design; locale-specific Japanese/Chinese alternate glyph designs are not claimed.
+No fake bold/italic is applied to this regular-only font; fallback from bold/italic CJK rejects explicitly.
+
+All nine files have TrueType 0x00010000 headers, cmap/glyf tables and no fvar table.
+SHA-256 (downloaded original binaries):
+730b5a43df486ddfca711cdf54a87836ca0913e2930f7e52d646beeb8efc5dc8 DroidSansFallback.ttf
+788abee4c806d660e8aee46689dd8540cd4bb98da03dcc9d171ce3efd99a9173 LiberationSans-Bold.ttf
+698da70fc191cc5f33ad4d6d3fe830fe4624b898ea2e3169955928b7c491f1ee LiberationSans-BoldItalic.ttf
+e5bae5c4cde31f22142753855f4f8fb86da6ff39955ed3c0a11248b0d16948b0 LiberationSans-Italic.ttf
+76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8 LiberationSans-Regular.ttf
+d754ba427cfe0bca54ae052384baa8f842da5bd6550ad4da024ac441e7a7d5ce LiberationSerif-Bold.ttf
+f17db8af71e24d2066b587546021d4f0b296be389512b658dec3c09affeb11a7 LiberationSerif-BoldItalic.ttf
+0e3dea9f8d613e006ccfa62201f33e265d19167bd0907725c3e145368b04fc2e LiberationSerif-Italic.ttf
+058ea80864aef09a23f45cbec2bb5400bc3dfbdea01c3f10538a21fcb497fb74 LiberationSerif-Regular.ttf

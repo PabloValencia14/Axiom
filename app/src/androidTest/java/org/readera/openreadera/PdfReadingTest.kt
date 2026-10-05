@@ -38,6 +38,14 @@ import org.readera.openreadera.engine.EngineManager
 import org.readera.openreadera.engine.RenderOptions
 import org.readera.openreadera.ui.reader.ReaderViewModel
 import java.io.File
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.pdmodel.PDPage
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
+import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
+import org.readera.openreadera.translation.DocumentTranslationCoordinator
+import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class PdfReadingTest {
@@ -372,5 +380,133 @@ class PdfReadingTest {
             file.delete()
             synchronized(prefsNames) { prefsNames.forEach { instrumentation.targetContext.deleteSharedPreferences(it) } }
         }
+    }
+    @Test
+    fun nativeTranslationCopyPreservesGraphicsAndReopensInActualEngine() = runBlocking {
+        val context = instrumentation.targetContext
+        PDFBoxResourceLoader.init(context)
+        val root = File(context.cacheDir, "native-pdf-engine-${System.nanoTime()}").apply { mkdirs() }
+        val source = File(root, "self-authored.pdf")
+        val outputDirectory = File(root, "output").apply { mkdirs() }
+        val evidence = File(context.getExternalFilesDir(null), "native-translation-${System.nanoTime()}").apply { mkdirs() }
+        val checker = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        try {
+            for (y in 0 until checker.height) for (x in 0 until checker.width)
+                checker.setPixel(x, y, if ((x + y) % 2 == 0) Color.MAGENTA else Color.GREEN)
+            PDDocument().use { document ->
+                val page = PDPage(PDRectangle(440f, 420f))
+                document.addPage(page)
+                PDPageContentStream(document, page).use { stream ->
+                    stream.setNonStrokingColor(.86f, .91f, .96f)
+                    stream.addRect(0f, 0f, 440f, 420f)
+                    stream.fill()
+                    stream.drawImage(LosslessFactory.createFromImage(document, checker), 185f, 110f, 56f, 56f)
+                    stream.setStrokingColor(.18f, .58f, .22f)
+                    stream.setLineWidth(2f)
+                    stream.moveTo(188f, 205f); stream.lineTo(242f, 245f); stream.stroke()
+                    stream.setNonStrokingColor(.1f, .2f, .4f)
+                    stream.beginText()
+                    stream.setFont(PDType1Font.HELVETICA, 12f)
+                    stream.newLineAtOffset(34f, 345f); stream.showText("Spanning heading.")
+                    stream.newLineAtOffset(0f, -35f); stream.showText("Left paragraph first.")
+                    stream.newLineAtOffset(0f, -16f); stream.showText("Left paragraph next.")
+                    stream.endText()
+                    stream.beginText()
+                    stream.setFont(PDType1Font.HELVETICA, 12f)
+                    stream.newLineAtOffset(258f, 310f); stream.showText("Right paragraph first.")
+                    stream.newLineAtOffset(0f, -16f); stream.showText("Right paragraph next.")
+                    stream.endText()
+                }
+                document.documentInformation.title = "Self-authored native translation fixture"
+                document.save(source)
+            }
+        } finally {
+            checker.recycle()
+        }
+        val originalBytes = source.readBytes()
+        val sourceHash = MessageDigest.getInstance("SHA-256").digest(originalBytes)
+        var originalPageWidth = 0f
+        var originalPageHeight = 0f
+        val sourceEngine = AndroidPdfEngine(context)
+        val sourceRender = Bitmap.createBitmap(880, 840, Bitmap.Config.ARGB_8888)
+        try {
+            assertTrue(sourceEngine.open(source.path))
+            assertEquals(1, sourceEngine.getPageCount())
+            originalPageWidth = sourceEngine.getPageSize(0).width
+            originalPageHeight = sourceEngine.getPageSize(0).height
+            assertTrue(sourceEngine.renderPage(0, sourceRender, RenderOptions()))
+            assertEquals(Color.rgb(219, 232, 245), sourceRender.getPixel(20, 20))
+            savePdfEvidence(sourceRender, File(evidence, "original-render.png"))
+        } finally {
+            sourceEngine.close()
+        }
+
+        val calls = mutableListOf<String>()
+        val coordinator = DocumentTranslationCoordinator(context)
+        val translated = coordinator.translateCopy(
+            source = coordinator.resolveSource(source.path),
+            outputDirectory = outputDirectory,
+            title = "Self-authored fixture",
+            targetLanguage = "es",
+            translate = { text, language ->
+                assertEquals("es", language)
+                calls += text
+                Result.success(
+                    when (text) {
+                        "Spanning heading." -> "Titulo."
+                        "Left paragraph first. Left paragraph next." -> "Texto izquierdo."
+                        "Right paragraph first. Right paragraph next." -> "Texto derecho."
+                        else -> error("Unexpected fixture paragraph: $text")
+                    }
+                )
+            },
+            onProgress = { _, _ -> }
+        )
+        assertEquals(listOf("Spanning heading.", "Left paragraph first. Left paragraph next.", "Right paragraph first. Right paragraph next."), calls)
+        assertEquals("pdf", translated.extension)
+        assertArrayEquals(originalBytes, source.readBytes())
+        assertArrayEquals(sourceHash, MessageDigest.getInstance("SHA-256").digest(source.readBytes()))
+        assertEquals(listOf(translated), outputDirectory.listFiles()!!.toList())
+
+        val reopened = AndroidPdfEngine(context)
+        val rendered = Bitmap.createBitmap(880, 840, Bitmap.Config.ARGB_8888)
+        try {
+            assertTrue(reopened.open(translated.path))
+            assertEquals(1, reopened.getPageCount())
+            assertEquals(originalPageWidth, reopened.getPageSize(0).width)
+            assertEquals(originalPageHeight, reopened.getPageSize(0).height)
+            assertTrue(reopened.renderPage(0, rendered, RenderOptions()))
+            val text = reopened.getPageText(0)
+            assertTrue(text, text.contains("Titulo."))
+            assertTrue(text, text.contains("Texto izquierdo."))
+            assertTrue(text, text.contains("Texto derecho."))
+            assertFalse(text, text.contains("Left paragraph first."))
+            assertFalse(text, text.contains("Right paragraph first."))
+            assertFalse(sourceRender.sameAs(rendered))
+            // Background, center artwork and vector remain byte-for-byte identical outside old/new text ink.
+            val old = sourceRender
+            val scaleX = old.width.toFloat() / 440f
+            val scaleY = old.height.toFloat() / 420f
+            val textZones = listOf(
+                android.graphics.RectF(0f, 35f, 230f, 165f),
+                android.graphics.RectF(245f, 95f, 440f, 145f)
+            ).map { android.graphics.Rect((it.left * scaleX).toInt(), (it.top * scaleY).toInt(), (it.right * scaleX).toInt(), (it.bottom * scaleY).toInt()) }
+            for (y in 0 until rendered.height step 3) for (x in 0 until rendered.width step 3) {
+                if (textZones.none { it.contains(x, y) }) assertEquals("Unchanged graphic pixel $x,$y", old.getPixel(x, y), rendered.getPixel(x, y))
+            }
+            savePdfEvidence(rendered, File(evidence, "translated-render.png"))
+            instrumentation.sendStatus(0, Bundle().apply {
+                putString("stream", "Native PDF translation output: ${translated.path}\nNative PDF visual evidence: ${evidence.path}\n")
+            })
+        } finally {
+            reopened.close()
+            rendered.recycle()
+            sourceRender.recycle()
+            root.deleteRecursively()
+        }
+    }
+
+    private fun savePdfEvidence(bitmap: Bitmap, file: File) {
+        file.outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
     }
 }

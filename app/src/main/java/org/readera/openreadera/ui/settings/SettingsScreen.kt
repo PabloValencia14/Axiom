@@ -724,6 +724,7 @@ private fun AboutOpenReadEraDialog(
                                 Text("Licencias de código abierto:", fontWeight = FontWeight.Bold)
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text("• Axiom (código propio de la aplicación): GNU AGPL v3 o posterior (ver LICENSE)\n• libmobi (conversor JNI de terceros): GNU LGPL v3 o posterior\n• PDFBox Android (Tom Roush): Apache License 2.0\n• Google ML Kit (Text Recognition y Document Scanner): Google Play Services / Apache 2.0\n• Jetpack Compose y AndroidX: Apache License 2.0\n• Kotlin y Coroutines: Apache License 2.0\n• Room Database: Apache License 2.0\n• Coil (carga de imágenes): Apache License 2.0\n• OkHttp (cliente de red): Apache License 2.0\n• Jsoup (análisis HTML): MIT License\n• miniz (compresión): Dominio público / MIT")
+                                Text("• Liberation Sans y Liberation Serif (fuentes incluidas para copias PDF traducidas): SIL Open Font License 1.1\n• Droid Sans Fallback (fuente CJK incluida, Android Open Source Project): Apache License 2.0")
                             }
                         }
                     }

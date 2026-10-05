@@ -6,6 +6,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
+val pdfBoxUnitTestResources = layout.buildDirectory.dir("generated/unitTest/pdfbox-resources")
+val extractPdfBoxUnitTestResources by tasks.registering(Sync::class) {
+    from({
+        configurations.getByName("debugRuntimeClasspath").files
+            .filter { it.name.startsWith("pdfbox-android-") && it.extension == "aar" }
+            .map { zipTree(it) }
+    }) {
+        include("assets/com/tom_roush/**")
+        eachFile { path = path.removePrefix("assets/") }
+        includeEmptyDirs = false
+    }
+    into(pdfBoxUnitTestResources)
+}
 val mobiFixtureAssets = layout.buildDirectory.dir("generated/androidTest/mobi-fixture")
 val copyMobiFixtureForAndroidTest by tasks.registering {
     outputs.dir(mobiFixtureAssets)
@@ -122,6 +135,13 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+    sourceSets.getByName("test").resources.srcDir(pdfBoxUnitTestResources)
+}
+tasks.configureEach {
+    if (name == "processDebugUnitTestJavaRes") dependsOn(extractPdfBoxUnitTestResources)
 }
 tasks.configureEach {
     if (name == "mergeDebugAndroidTestAssets") {

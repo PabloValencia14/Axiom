@@ -1252,11 +1252,6 @@ class ReaderViewModel(
         }
     }
 
-    /** Whole-document export calls this on IO; it does not trigger a background whole-book OCR scan. */
-    fun getNativePageTextForExport(pageIndex: Int): String =
-        engine?.let { synchronized(it) { it.getPageText(pageIndex) } }.orEmpty()
-
-
     fun getPageAspectRatio(pageIndex: Int): Float = pageAspectRatios[pageIndex] ?: 0f
 
     fun getPageTextRange(pageIndex: Int): PageTextRange? = engine?.getPageTextRange(pageIndex)

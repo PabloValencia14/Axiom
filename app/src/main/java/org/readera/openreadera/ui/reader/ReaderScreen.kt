@@ -1398,11 +1398,9 @@ fun ReaderScreen(
     if (showTranslateDialog) {
         DocumentTranslationDialog(
             bookTitle = state.book?.title ?: "Documento",
-            bookAuthor = state.book?.author ?: "Autor desconocido",
             currentPage = state.currentPage,
-            totalPages = state.totalPages,
             getCurrentPageText = { currentPageText?.layout?.text.orEmpty() },
-            getPageTextByIndex = viewModel::getNativePageTextForExport,
+            sourcePath = state.book?.filePath.orEmpty(),
             onBookGenerated = { file ->
                 viewModel.scanGeneratedBook(file)
             },
