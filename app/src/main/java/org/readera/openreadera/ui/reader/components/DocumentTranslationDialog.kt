@@ -37,6 +37,7 @@ import org.readera.openreadera.translation.DocumentTranslationCoordinator
 import org.readera.openreadera.translation.GoogleTranslateService
 import org.readera.openreadera.translation.NativeTextTranslator
 import org.readera.openreadera.translation.ResolvedTranslationSource
+import org.readera.openreadera.translation.TranslationRejectedException
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,7 +83,7 @@ fun DocumentTranslationDialog(
     var fullProgress by remember { mutableFloatStateOf(0f) }
     var fullStatusMessage by remember { mutableStateOf("") }
     var completedFile by remember { mutableStateOf<File?>(null) }
-    var fullError by remember { mutableStateOf<String?>(null) }
+    var fullError by remember { mutableStateOf<Exception?>(null) }
     var fullTranslationJob by remember { mutableStateOf<Job?>(null) }
     LaunchedEffect(currentPage, targetLang) {
         pageTranslationJob?.cancel()
@@ -123,7 +124,7 @@ fun DocumentTranslationDialog(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
-                    fullError = error.message ?: "No se pudo generar el documento traducido."
+                    fullError = error
                 } finally {
                     if (!handedOff) generated?.delete()
                     isTranslatingFull = false
@@ -532,7 +533,7 @@ fun DocumentTranslationDialog(
                         if (fullError != null) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = fullError ?: "",
+                                text = fullError?.let(::documentTranslationErrorMessage).orEmpty(),
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall
                             )
@@ -564,7 +565,7 @@ fun DocumentTranslationDialog(
 
 internal fun nativeTranslationFidelityInfo(format: DocumentFormat, suffix: String): String {
     val fidelity = when (format) {
-        DocumentFormat.PDF -> "PDF: conserva páginas, posiciones, imágenes y diseño; solo admite ajustes moderados de fuente (hasta 15 %) e interlineado (hasta 10 %), sin bajar de 9 pt salvo fuentes ya menores."
+        DocumentFormat.PDF -> "PDF: conserva el contenido original vectorial y coloca su traducción debajo en las bandas correspondientes; amplía la página para mostrar el texto completo sin reducir la fuente."
         DocumentFormat.DOCX -> "DOCX: conserva la estructura editable, estilos, tablas e imágenes; Word puede repaginar el texto traducido."
         DocumentFormat.EPUB -> "EPUB: conserva estructura, estilos, imágenes y recursos; permite reflujo del texto y cambios de paginación."
         DocumentFormat.FB2 -> "FB2: conserva la estructura, el formato y las imágenes; el lector puede redistribuir el texto."
@@ -572,5 +573,8 @@ internal fun nativeTranslationFidelityInfo(format: DocumentFormat, suffix: Strin
         DocumentFormat.MOBI, DocumentFormat.AZW, DocumentFormat.AZW3 -> "Kindle: requiere confirmar esta exportación a EPUB; el EPUB conserva los recursos de la conversión y permite reflujo."
         else -> "Este formato no admite exportación con texto nativo seleccionable."
     }
-    return "$fidelity Solo se traduce texto nativo seleccionable; no se reconstruyen escaneos ni imágenes. Si el texto no cabe con el ajuste moderado permitido, se rechaza toda la copia: nunca se recorta ni se sustituye por texto original. El original permanece intacto."
+    return "$fidelity Solo se traduce texto nativo seleccionable; no se reconstruyen escaneos ni se sustituyen imágenes. El original permanece intacto."
 }
+
+internal fun documentTranslationErrorMessage(error: Exception): String =
+    error.message.orEmpty().ifBlank { "No se pudo generar el documento traducido." }

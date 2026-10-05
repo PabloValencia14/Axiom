@@ -39,10 +39,13 @@ import org.readera.openreadera.engine.RenderOptions
 import org.readera.openreadera.ui.reader.ReaderViewModel
 import java.io.File
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import com.tom_roush.pdfbox.pdmodel.PDResources
+import com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import org.readera.openreadera.translation.DocumentTranslationCoordinator
 import java.security.MessageDigest
@@ -482,46 +485,211 @@ class PdfReadingTest {
         assertEquals(listOf(translated), outputDirectory.listFiles()!!.toList())
 
         val reopened = AndroidPdfEngine(context)
-        val rendered = Bitmap.createBitmap(880, 840, Bitmap.Config.ARGB_8888)
+        var rendered: Bitmap? = null
         try {
             assertTrue(reopened.open(translated.path))
             assertEquals(1, reopened.getPageCount())
-            assertEquals(originalPageWidth, reopened.getPageSize(0).width)
-            assertEquals(originalPageHeight, reopened.getPageSize(0).height)
-            assertTrue(reopened.renderPage(0, rendered, RenderOptions()))
+            val outputPageSize = reopened.getPageSize(0)
+            assertEquals(originalPageWidth, outputPageSize.width)
+            assertTrue("translated page grows to fit below-band prose", outputPageSize.height > originalPageHeight)
+            val renderedBitmap = Bitmap.createBitmap(880, (outputPageSize.height * 2f).toInt(), Bitmap.Config.ARGB_8888)
+            rendered = renderedBitmap
+            assertTrue(reopened.renderPage(0, renderedBitmap, RenderOptions()))
             val text = reopened.getPageText(0)
             assertTrue(text, text.contains("Titulo."))
             assertTrue(text, text.contains("Trazo."))
             assertTrue(text, text.contains("Relleno."))
             assertTrue(text, text.contains("Texto izquierdo."))
             assertTrue(text, text.contains("Texto derecho."))
-            assertFalse(text, text.contains("Left paragraph first."))
-            assertFalse(text, text.contains("Right paragraph first."))
-            assertFalse(sourceRender.sameAs(rendered))
-            // Background, center artwork and vector remain byte-for-byte identical outside old/new text ink.
-            val old = sourceRender
-            val scaleX = old.width.toFloat() / 440f
-            val scaleY = old.height.toFloat() / 420f
-            val textZones = listOf(
-                android.graphics.RectF(0f, 10f, 230f, 165f),
-                android.graphics.RectF(245f, 95f, 440f, 145f)
-            ).map { android.graphics.Rect((it.left * scaleX).toInt(), (it.top * scaleY).toInt(), (it.right * scaleX).toInt(), (it.bottom * scaleY).toInt()) }
-            for (y in 0 until rendered.height step 3) for (x in 0 until rendered.width step 3) {
-                if (textZones.none { it.contains(x, y) }) assertEquals("Unchanged graphic pixel $x,$y", old.getPixel(x, y), rendered.getPixel(x, y))
-            }
-            savePdfEvidence(rendered, File(evidence, "translated-render.png"))
+            assertTrue(text, text.contains("Left paragraph first."))
+            assertTrue(text, text.contains("Right paragraph first."))
+            val originalArtwork = magentaPixelCount(sourceRender)
+            val translatedArtwork = magentaPixelCount(renderedBitmap)
+            assertTrue("source image lost or repeated ($originalArtwork -> $translatedArtwork)",
+                translatedArtwork.toFloat() in (originalArtwork * .9f)..(originalArtwork * 1.1f))
+            savePdfEvidence(renderedBitmap, File(evidence, "translated-render.png"))
             instrumentation.sendStatus(0, Bundle().apply {
                 putString("stream", "Native PDF translation output: ${translated.path}\nNative PDF visual evidence: ${evidence.path}\n")
             })
         } finally {
             reopened.close()
-            rendered.recycle()
+            rendered?.recycle()
             sourceRender.recycle()
             root.deleteRecursively()
         }
     }
+    @Test
+    fun extremeTranslationPaginationRendersOnPlatformEngine() = runBlocking {
+        val context = instrumentation.targetContext
+        PDFBoxResourceLoader.init(context)
+        val root = File(context.cacheDir, "translation-pages-${System.nanoTime()}").apply { mkdirs() }
+        val source = File(root, "source.pdf")
+        val outputDirectory = File(root, "output").apply { mkdirs() }
+        try {
+            PDDocument().use { document ->
+                val page = PDPage(PDRectangle(440f, 300f))
+                document.addPage(page)
+                page.resources = PDResources().apply { put(COSName.getPDFName("F1"), PDType1Font.HELVETICA) }
+                PDPageContentStream(document, page).use { stream ->
+                    stream.beginText()
+                    stream.setFont(PDType1Font.HELVETICA, 20f)
+                    stream.newLineAtOffset(40f, 220f)
+                    stream.showText("Short prose.")
+                    stream.endText()
+                }
+                document.save(source)
+            }
+            val translation = "long text ".repeat(12_000)
+            val translated = DocumentTranslationCoordinator(context).translateCopy(
+                source = DocumentTranslationCoordinator(context).resolveSource(source.path),
+                outputDirectory = outputDirectory,
+                title = "Long flow pagination proof",
+                targetLanguage = "es",
+                translate = { _, _ -> Result.success(translation) },
+                onProgress = { _, _ -> }
+            )
+            val engine = AndroidPdfEngine(context)
+            try {
+                assertTrue(engine.open(translated.path))
+                assertTrue("oversized text flows to another page", engine.getPageCount() > 1)
+                val texts = (0 until engine.getPageCount()).map { index ->
+                    val size = engine.getPageSize(index)
+                    assertTrue(size.height <= 14_400f)
+                    val bitmap = Bitmap.createBitmap(88, (88f * size.height / size.width).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+                    try { assertTrue("platform renders continuation page $index", engine.renderPage(index, bitmap, RenderOptions())) }
+                    finally { bitmap.recycle() }
+                    engine.getPageText(index)
+                }
+                val text = texts.joinToString(" ").replace(Regex("\\s+"), " ")
+                assertTrue(text.indexOf("Short prose.") in 0 until text.indexOf("long text"))
+                assertEquals(12_000, Regex("long text").findAll(text).count())
+            } finally { engine.close() }
+        } finally { root.deleteRecursively() }
+    }
 
+    @Test
+    fun croppedRotatedNestedPdfImagesRenderOnceInPlatformEngine() = runBlocking {
+        val context = instrumentation.targetContext
+        PDFBoxResourceLoader.init(context)
+        val root = File(context.cacheDir, "rotated-band-${System.nanoTime()}").apply { mkdirs() }
+        val source = File(root, "source.pdf")
+        val outputDirectory = File(root, "output").apply { mkdirs() }
+        val evidence = File(context.getExternalFilesDir(null), "rotated-band-proof-${System.nanoTime()}").apply { mkdirs() }
+        val checker = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        try {
+            for (y in 0..3) for (x in 0..3)
+                checker.setPixel(x, y, if ((x + y) % 2 == 0) Color.MAGENTA else Color.GREEN)
+            PDDocument().use { document ->
+                val image = LosslessFactory.createFromImage(document, checker)
+                val shared = PDFormXObject(document).apply {
+                    setBBox(PDRectangle(180f, 90f))
+                    resources = PDResources()
+                }
+                shared.resources.put(COSName.getPDFName("F1"), PDType1Font.HELVETICA)
+                shared.resources.put(COSName.getPDFName("Im1"), image)
+                shared.contentStream.createOutputStream().use {
+                    it.write("q 20 0 0 20 110 20 cm /Im1 Do Q BT /F1 12 Tf 1 0 0 1 5 62 Tm (Cropping form prose.) Tj ET".toByteArray())
+                }
+                for (rotation in listOf(0, 90, 180, 270)) {
+                    val page = PDPage(PDRectangle(440f, 440f))
+                    document.addPage(page)
+                    page.cropBox = PDRectangle(30f, 40f, 350f, 360f)
+                    page.rotation = rotation
+                    PDPageContentStream(document, page).use { stream ->
+                        stream.setNonStrokingColor(.86f, .91f, .96f)
+                        stream.addRect(30f, 40f, 350f, 360f); stream.fill()
+                        for ((x, y) in listOf(60f to 300f, 210f to 150f)) {
+                            stream.saveGraphicsState()
+                            stream.transform(com.tom_roush.pdfbox.util.Matrix.getTranslateInstance(x, y))
+                            stream.drawForm(shared)
+                            stream.restoreGraphicsState()
+                        }
+                    }
+                }
+                val blank = PDPage(PDRectangle(440f, 440f))
+                document.addPage(blank)
+                PDPageContentStream(document, blank).use {
+                    it.setNonStrokingColor(.2f, .5f, .7f); it.addRect(40f, 40f, 30f, 30f); it.fill()
+                }
+                document.save(source)
+            }
+        } finally { checker.recycle() }
+        val sourceHash = MessageDigest.getInstance("SHA-256").digest(source.readBytes())
+        val sourceSizes = mutableListOf<org.readera.openreadera.engine.PageSize>()
+        val sourceArtwork = mutableListOf<Int>()
+        val sourceEngine = AndroidPdfEngine(context)
+        try {
+            assertTrue(sourceEngine.open(source.path))
+            assertEquals(5, sourceEngine.getPageCount())
+            for (index in 0..3) {
+                val size = sourceEngine.getPageSize(index)
+                sourceSizes += size
+                val bitmap = Bitmap.createBitmap((size.width * 2f).toInt(), (size.height * 2f).toInt(), Bitmap.Config.ARGB_8888)
+                try {
+                    assertTrue(sourceEngine.renderPage(index, bitmap, RenderOptions()))
+                    sourceArtwork += magentaPixelCount(bitmap)
+                    savePdfEvidence(bitmap, File(evidence, "source-rotation-$index.png"))
+                } finally { bitmap.recycle() }
+            }
+        } finally { sourceEngine.close() }
+        val calls = mutableListOf<String>()
+        val coordinator = DocumentTranslationCoordinator(context)
+        val translated = coordinator.translateCopy(
+            source = coordinator.resolveSource(source.path),
+            outputDirectory = outputDirectory,
+            title = "Rotated image proof",
+            targetLanguage = "es",
+            translate = { text, language ->
+                assertEquals("es", language)
+                calls += text
+                Result.success("DEMO SIN GOOGLE: Traduccion completa debajo. ".repeat(8) + text)
+            },
+            onProgress = { _, _ -> }
+        )
+        assertEquals(8, calls.size)
+        assertEquals(sourceHash.toList(), MessageDigest.getInstance("SHA-256").digest(source.readBytes()).toList())
+        val outputEngine = AndroidPdfEngine(context)
+        try {
+            assertTrue(outputEngine.open(translated.path))
+            assertEquals(5, outputEngine.getPageCount())
+            val outputArtwork = mutableListOf<Int>()
+            for (index in 0..3) {
+                val size = outputEngine.getPageSize(index)
+                assertEquals(sourceSizes[index].width, size.width)
+                assertTrue("page $index expands after long translation", size.height > sourceSizes[index].height)
+                val text = outputEngine.getPageText(index).filterNot(Char::isWhitespace)
+                assertTrue(text, text.contains("Croppingformprose."))
+                assertTrue(text, text.contains("DEMOSINGOOGLE:Traduccioncompletadebajo."))
+                val bitmap = Bitmap.createBitmap((size.width * 2f).toInt(), (size.height * 2f).toInt(), Bitmap.Config.ARGB_8888)
+                try {
+                    assertTrue(outputEngine.renderPage(index, bitmap, RenderOptions()))
+                    val pixels = magentaPixelCount(bitmap)
+                    outputArtwork += pixels
+                    assertTrue("rotation $index artwork coverage changed (${sourceArtwork[index]} -> $pixels)",
+                        pixels.toFloat() in (sourceArtwork[index] * .9f)..(sourceArtwork[index] * 1.1f))
+                    savePdfEvidence(bitmap, File(evidence, "translated-rotation-$index.png"))
+                } finally { bitmap.recycle() }
+            }
+            assertEquals(440f, outputEngine.getPageSize(4).width)
+            assertEquals(440f, outputEngine.getPageSize(4).height)
+            translated.copyTo(File(evidence, translated.name), overwrite = true)
+            instrumentation.sendStatus(0, Bundle().apply {
+                putString("stream", "Platform PdfRenderer image proof: rotations=0,90,180,270; sourcePixels=$sourceArtwork; outputPixels=$outputArtwork; evidence=${evidence.path}\n")
+            })
+        } finally {
+            outputEngine.close()
+            root.deleteRecursively()
+        }
+    }
     private fun savePdfEvidence(bitmap: Bitmap, file: File) {
         file.outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+    }
+    private fun magentaPixelCount(bitmap: Bitmap): Int {
+        var count = 0
+        for (y in 0 until bitmap.height) for (x in 0 until bitmap.width) {
+            val pixel = bitmap.getPixel(x, y)
+            if (Color.red(pixel) > 200 && Color.green(pixel) < 100 && Color.blue(pixel) > 150) count++
+        }
+        return count
     }
 }
