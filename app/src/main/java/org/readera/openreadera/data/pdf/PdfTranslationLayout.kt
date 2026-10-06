@@ -404,90 +404,30 @@ internal sealed interface PdfTranslatedPart {
     data class Protected(val anchor: PdfProtectedAnchor) : PdfTranslatedPart
 }
 
-internal data class PdfParagraphTranslationRequest(
-    val text: String,
-    private val markers: Map<String, PdfParagraphPart>,
-    private val expectedMarkers: List<String>,
-    private val baseStyle: PdfShow
-) {
-    fun parse(translated: String): List<PdfTranslatedPart> {
-        expectedMarkers.forEach { marker ->
-            val first=translated.indexOf(marker)
-            if (first<0 || translated.indexOf(marker,first+marker.length)>=0)
-                rejectPdf("Translation provider altered or duplicated a protected style/math marker",baseStyle.location)
-        }
-        val result = mutableListOf<PdfTranslatedPart>()
-        var style = baseStyle
-        var activeMarker: String? = null
-        var offset = 0
-        PDF_TRANSLATION_MARKER.findAll(translated).forEach { match ->
-            if (match.range.first < offset) rejectPdf("Malformed translated style/math markers", baseStyle.location)
-            if (match.range.first > offset) {
-                val value = translated.substring(offset, match.range.first)
-                if (value.isNotEmpty()) result += PdfTranslatedPart.Text(value, style)
-            }
-            val token = match.value
-            val source = markers[token] ?: rejectPdf("Unknown translated style/math marker", baseStyle.location)
-            when (source) {
-                is PdfParagraphPart.Text -> {
-                    if (token.endsWith("_BEGIN__")) {
-                        if (activeMarker != null) rejectPdf("Crossed translated style markers", baseStyle.location)
-                        activeMarker = token
-                        style = source.sourceStyle
-                    } else {
-                        val open = token.removeSuffix("_END__") + "_BEGIN__"
-                        if (activeMarker != open) rejectPdf("Unbalanced translated style markers", baseStyle.location)
-                        activeMarker = null
-                        style = baseStyle
-                    }
-                }
-                is PdfParagraphPart.MathAnchor, is PdfParagraphPart.CitationAnchor -> {
-                    if (activeMarker != null) rejectPdf("Protected citation or math anchor is nested inside a style marker", baseStyle.location)
-                    result += PdfTranslatedPart.Protected(source as PdfProtectedAnchor)
-                }
-            }
-            offset = match.range.last + 1
-        }
-        if (offset < translated.length) result += PdfTranslatedPart.Text(translated.substring(offset),style)
-        if (activeMarker != null) rejectPdf("Unclosed translated style marker", baseStyle.location)
-        return result
+/** Ordered prose chunks are coalesced across PDF operator/style fragments; protected anchors stay local. */
+internal fun PdfParagraph.translationParts(): List<PdfTranslatedPart> {
+    val baseStyle = parts.filterIsInstance<PdfParagraphPart.Text>().firstOrNull()?.sourceStyle ?: first
+    val result = mutableListOf<PdfTranslatedPart>()
+    var prose = StringBuilder()
+    fun flush() {
+        if (prose.isNotEmpty()) result += PdfTranslatedPart.Text(prose.toString(), baseStyle)
+        prose = StringBuilder()
     }
-}
-
-private val PDF_TRANSLATION_MARKER = Regex("""__AXIOM_[A-F0-9]+_(?:S\d+_(?:BEGIN|END)|[MC]\d+)__""")
-
-internal fun PdfParagraph.translationRequest(): PdfParagraphTranslationRequest {
-    val prose=parts.filterIsInstance<PdfParagraphPart.Text>()
-    val baseStyle=prose.firstOrNull()?.sourceStyle ?: first
-    var nonce=text.hashCode().toUInt().toString(16).uppercase()
-    while(text.contains("__AXIOM_${nonce}_")) nonce+="F"
-    val styled=prose.any { !sameParagraphStyle(baseStyle,it.sourceStyle) }
-    val markers=linkedMapOf<String,PdfParagraphPart>()
-    val expected=mutableListOf<String>()
-    val request=buildString {
-        parts.forEachIndexed { index,part ->
-            when(part) {
-                is PdfParagraphPart.Text -> {
-                    if(styled && !sameParagraphStyle(baseStyle,part.sourceStyle)) {
-                        val begin="__AXIOM_${nonce}_S${index}_BEGIN__"
-                        val end="__AXIOM_${nonce}_S${index}_END__"
-                        markers[begin]=part; markers[end]=part
-                        expected+=begin; expected+=end
-                        append(begin).append(part.text).append(end)
-                    } else append(part.text)
-                }
-                is PdfParagraphPart.MathAnchor -> {
-                    val marker="__AXIOM_${nonce}_M${part.id}__"
-                    markers[marker]=part; expected+=marker; append(marker)
-                }
-                is PdfParagraphPart.CitationAnchor -> {
-                    val marker="__AXIOM_${nonce}_C${part.id}__"
-                    markers[marker]=part; expected+=marker; append(marker)
-                }
+    parts.forEach { part ->
+        when (part) {
+            is PdfParagraphPart.Text -> prose.append(part.text)
+            is PdfParagraphPart.MathAnchor -> {
+                flush()
+                result += PdfTranslatedPart.Protected(part)
+            }
+            is PdfParagraphPart.CitationAnchor -> {
+                flush()
+                result += PdfTranslatedPart.Protected(part)
             }
         }
     }
-    return PdfParagraphTranslationRequest(request,markers,expected,baseStyle)
+    flush()
+    return result
 }
 
 internal fun requireSimplePdfScript(text: String, location: String) {

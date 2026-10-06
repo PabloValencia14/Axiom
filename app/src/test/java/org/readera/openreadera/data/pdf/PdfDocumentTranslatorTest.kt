@@ -35,8 +35,6 @@ import java.io.IOException
 class PdfDocumentTranslatorTest {
     private val context get() = RuntimeEnvironment.getApplication()
     private val font get() = PDType1Font.HELVETICA
-    private val marker = Regex("""__AXIOM_[A-F0-9]+_(?:S\d+_(?:BEGIN|END)|[MC]\d+)__""")
-
     @Test fun longTranslationFlowsBelowOriginalWithoutFontReductionOrTruncation() = runBlocking {
         withFiles { source, output ->
             simple(source, "BT /F1 20 Tf 1 0 0 1 40 220 Tm (Short prose.) Tj ET")
@@ -83,19 +81,18 @@ class PdfDocumentTranslatorTest {
             }
             val original = source.readBytes()
             val calls = mutableListOf<String>()
-            val translatedChunks = mapOf(
-                "Spanning full-width heading across the page." to "Título.",
-                "Left paragraph first. Left paragraph next." to "Párrafo izquierdo.",
-                "Right paragraph first. Right paragraph next." to "Párrafo derecho.",
-                "(Lab, 2025)" to "(Lab, 2025)",
-                "Occlusion sample." to "Tapado."
-            )
             val longText = "Expanded translation flows below the source. ".repeat(30)
             PdfDocumentTranslator(context).translateCopy(source, output, "es", { request, _ ->
                 calls += request
-                Result.success(translateProse(request, translatedChunks, longText))
+                val damagedMarkerResponse = request.replace("__AXIOM_", "<mangled>")
+                assertEquals("Provider input must not contain protected markers", request, damagedMarkerResponse)
+                assertFalse(request.contains("Lab, 2025"))
+                assertFalse(request.contains("= 2"))
+                Result.success(if (request.startsWith("Right paragraph")) longText else "Traducción.")
             }, { _, _ -> })
-            assertTrue(calls.any { Regex("""__AXIOM_[A-F0-9]+_C\d+__""").containsMatchIn(it) })
+            assertTrue(calls.none { it.contains("__AXIOM_") })
+            assertEquals(1, calls.count { it.startsWith("Right paragraph first.") })
+            assertEquals(1, calls.count { it.startsWith("Spanning full-width heading") })
             PDDocument.load(source).use { before -> PDDocument.load(output).use { document ->
                 val page = document.getPage(0)
                 assertEquals(1, document.numberOfPages)
@@ -103,7 +100,7 @@ class PdfDocumentTranslatorTest {
                 val text = PDFTextStripper().getText(document).replace(Regex("\\s+"), " ")
                 listOf("Spanning full-width heading", "Left paragraph first.", "Right paragraph first.", "= 2", "Lab, 2025")
                     .forEach { assertTrue("original text/formula/citation missing: $it", text.contains(it)) }
-                assertTrue(text.contains("Párrafo izquierdo."))
+                assertTrue(text.contains("Traducción."))
                 assertTrue(text.contains("Expanded translation flows below the source."))
                 assertEquals(1, Regex("Spanning full-width heading").findAll(text).count())
                 assertTrue(page.resources.fontNames.map { page.resources.getFont(it).name }.any { it.contains("Bold") })
@@ -181,6 +178,26 @@ class PdfDocumentTranslatorTest {
         }
     }
 
+    @Test fun failureAfterFirstProseChunkNeverPublishesPartialPdf() = runBlocking {
+        withFiles { source, output ->
+            simple(source, "BT /F1 12 Tf 1 0 0 1 40 220 Tm (Before text) Tj 1 0 0 1 100 220 Tm (= 2) Tj 1 0 0 1 130 220 Tm (after text) Tj ET")
+            val original = source.readBytes()
+            var calls = 0
+            val failure = runCatching {
+                PdfDocumentTranslator(context).translateCopy(source, output, "es", { text, _ ->
+                    calls++
+                    assertFalse(text.contains("= 2"))
+                    if (calls == 1) Result.success("Antes del texto")
+                    else Result.failure(IOException("provider unavailable"))
+                }, { _, _ -> })
+            }.exceptionOrNull()
+            assertTrue(failure is IOException && failure.message == "provider unavailable")
+            assertEquals(2, calls)
+            assertFalse(output.exists())
+            assertArrayEquals(original, source.readBytes())
+        }
+    }
+
     @Test fun explicitlyClippedProseRemainsTranslatableFromCopiedPageContent() = runBlocking {
         withFiles { source, output ->
             simple(source, "q 40 220 4 4 re W n BT /F1 12 Tf 1 0 0 1 40 220 Tm (Clipped prose.) Tj ET Q")
@@ -250,31 +267,6 @@ class PdfDocumentTranslatorTest {
             }
             assertRejectedWithoutProvider(source, output, "Type3")
         }
-    }
-
-    private fun translateProse(request: String, translations: Map<String, String>, longText: String): String {
-        val output = StringBuilder()
-        var offset = 0
-        marker.findAll(request).forEach { match ->
-            val chunk = request.substring(offset, match.range.first)
-            output.append(translateChunk(chunk, translations, longText))
-            output.append(match.value)
-            offset = match.range.last + 1
-        }
-        output.append(translateChunk(request.substring(offset), translations, longText))
-        return output.toString()
-    }
-
-    private fun translateChunk(chunk: String, translations: Map<String, String>, longText: String): String {
-        val leading = chunk.takeWhile(Char::isWhitespace)
-        val trailing = chunk.takeLastWhile(Char::isWhitespace)
-        val text = chunk.trim()
-        val translation = when {
-            text.contains("Right paragraph") -> longText
-            text.isEmpty() -> text
-            else -> translations[text] ?: "Traducción."
-        }
-        return if (text.isEmpty()) chunk else leading + translation + trailing
     }
 
     private suspend fun assertRejectedWithoutProvider(source: File, output: File, reason: String) {

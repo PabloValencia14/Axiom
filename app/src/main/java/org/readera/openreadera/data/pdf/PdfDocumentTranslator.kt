@@ -60,10 +60,27 @@ class PdfDocumentTranslator(context: Context) {
                 onProgress(0, paragraphs.size)
                 paragraphs.forEachIndexed { index, paragraph ->
                     currentCoroutineContext().ensureActive()
-                    val request = paragraph.translationRequest()
-                    val response = translate(request.text, targetLanguage).getOrThrow()
-                    if (response != request.text)
-                        translated += PdfBilingualComposer.Translation(paragraph, request.parse(response))
+                    var changed = false
+                    val parts = paragraph.translationParts().map { part ->
+                        currentCoroutineContext().ensureActive()
+                        when (part) {
+                            is PdfTranslatedPart.Protected -> part
+                            is PdfTranslatedPart.Text -> {
+                                val leading = part.text.takeWhile(Char::isWhitespace)
+                                val trailing = part.text.takeLastWhile(Char::isWhitespace)
+                                val body = part.text.drop(leading.length).dropLast(trailing.length)
+                                if (body.isEmpty()) part
+                                else {
+                                    val response = translate(body, targetLanguage).getOrThrow()
+                                    if (response.isBlank())
+                                        throw IOException("Translation provider returned blank PDF prose")
+                                    changed = changed || response != body
+                                    PdfTranslatedPart.Text(leading + response + trailing, part.sourceStyle)
+                                }
+                            }
+                        }
+                    }
+                    if (changed) translated += PdfBilingualComposer.Translation(paragraph, parts)
                     onProgress(index + 1, paragraphs.size)
                 }
                 PdfBilingualComposer(document, fonts).compose(pages, roots, sourceParagraphs, translated)
