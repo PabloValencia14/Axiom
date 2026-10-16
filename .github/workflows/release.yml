@@ -44,7 +44,7 @@ jobs:
           cd release-assets
           sha256sum *.apk > SHA256SUMS.txt
           printf '%s\n' 'Development build signed with the Android debug key. Not a production-signed APK; updates require this same debug signing key.' > SIGNING.txt
-      - name: Create GitHub Release
+      - name: Create draft for device verification and signing continuity
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --title "Axiom $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --draft --generate-notes --title "Axiom $GITHUB_REF_NAME"

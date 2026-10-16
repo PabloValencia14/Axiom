@@ -1,6 +1,7 @@
 package org.readera.openreadera.data.pdf
 
 import android.content.Context
+import android.graphics.Region
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.pdmodel.PDDocument
@@ -11,8 +12,10 @@ import kotlinx.coroutines.withContext
 import org.readera.openreadera.translation.NativeTextTranslator
 import java.io.File
 import java.io.IOException
+import kotlin.math.ceil
+import kotlin.math.floor
 
-/** Copies original PDF artwork as vector bands and adds selectable translated prose below it. */
+/** Replaces native prose within its original bounds, preserving pages and non-text artwork. */
 class PdfDocumentTranslator(context: Context) {
     private val context = context.applicationContext
     init { PDFBoxResourceLoader.init(this.context) }
@@ -50,13 +53,22 @@ class PdfDocumentTranslator(context: Context) {
                 paragraphs.forEach { paragraph ->
                     val prose = paragraph.parts.filterIsInstance<PdfParagraphPart.Text>()
                     prose.forEach { part ->
+                        part.glyphs.forEach { ref ->
+                            val ink = ref.glyph.pageInk
+                            if (!ink.isEmpty) {
+                                val outside = Region(floor(ink.left).toInt(), floor(ink.top).toInt(),
+                                    ceil(ink.right).toInt(), ceil(ink.bottom).toInt())
+                                outside.op(ref.show.state.currentClippingPath, Region.Op.DIFFERENCE)
+                                if (!outside.isEmpty) rejectPdf("Native prose is clipped by a page or Form boundary", ref.show.location)
+                            }
+                        }
                         requireSimplePdfScript(part.text, paragraph.first.location)
                         val sourceFont = part.sourceStyle.state.textState.font
                             ?: rejectPdf("Text style has no source font", part.sourceStyle.location)
                         fonts.choose(sourceFont, part.text, part.sourceStyle.location)
                     }
                 }
-                val translated = mutableListOf<PdfBilingualComposer.Translation>()
+                val translated = mutableListOf<PdfInPlaceComposer.Translation>()
                 onProgress(0, paragraphs.size)
                 paragraphs.forEachIndexed { index, paragraph ->
                     currentCoroutineContext().ensureActive()
@@ -75,15 +87,15 @@ class PdfDocumentTranslator(context: Context) {
                                     if (response.isBlank())
                                         throw IOException("Translation provider returned blank PDF prose")
                                     changed = changed || response != body
-                                    PdfTranslatedPart.Text(leading + response + trailing, part.sourceStyle)
+                                    part.copy(text = leading + response + trailing)
                                 }
                             }
                         }
                     }
-                    if (changed) translated += PdfBilingualComposer.Translation(paragraph, parts)
+                    if (changed) translated += PdfInPlaceComposer.Translation(paragraph, parts)
                     onProgress(index + 1, paragraphs.size)
                 }
-                PdfBilingualComposer(document, fonts).compose(pages, roots, sourceParagraphs, translated)
+                PdfInPlaceComposer(document, fonts).compose(roots, translated)
                 if (!output.createNewFile()) throw IOException("PDF output already exists")
                 ownsOutput = true
                 document.save(output)

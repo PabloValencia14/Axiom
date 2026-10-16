@@ -184,6 +184,8 @@ class ReaderControlsTest {
                 }
             }
         }
+        instrumentation.waitForIdleSync()
+        instrumentation.uiAutomation.waitForIdle(100,5_000)
     }
 
     private fun assertAppOwnsFocus() {
@@ -209,6 +211,7 @@ class ReaderControlsTest {
         var clickableTarget = target
         while (!clickableTarget.isClickable && clickableTarget.parent != null) clickableTarget = checkNotNull(clickableTarget.parent)
         assertTrue("$label resolves to a clickable accessibility node", clickableTarget.isClickable)
+        assertTrue(clickableTarget.refresh())
         val bounds = Rect()
         clickableTarget.getBoundsInScreen(bounds)
         assertFalse("$label has a visible touch target", bounds.isEmpty)
@@ -253,6 +256,34 @@ class ReaderControlsTest {
     }
 
     @Test
+    fun localPdfExportIsSelectedByDefaultAndCompletesThroughTheDialog() {
+        val root = java.io.File(instrumentation.targetContext.cacheDir,"translation-local-ui-${System.nanoTime()}").apply { mkdirs() }
+        val source = java.io.File(root,"source.pdf")
+        val output = java.io.File(root,"output").apply { mkdirs() }
+        translationPdf(source)
+        val original = source.readBytes()
+        var onlineCalls = 0
+        ActivityScenario.launch(ReaderInkTestActivity::class.java).use { scenario ->
+            showTranslationDialog(scenario,source,output) { _, _ -> onlineCalls++; Result.success("Unexpected") }
+            tapOwned("Documento / Paper completo")
+            assertTrue(awaitNode("Traducir en el dispositivo (ML Kit)") { it.isCheckable && it.isChecked }.isChecked)
+            tapOwned("Crear copia con Google Translate")
+            assertNotNull(awaitContainingText("¡Copia traducida e íntegra guardada!"))
+            assertEquals(0,onlineCalls)
+            val translated = output.listFiles().orEmpty().single()
+            assertEquals("pdf",translated.extension)
+            PDDocument.load(translated).use { document ->
+                assertEquals(1,document.numberOfPages)
+                val text = com.tom_roush.pdfbox.text.PDFTextStripper().getText(document).trim()
+                assertTrue(text.isNotBlank()); assertFalse(text.contains("Original prose."))
+            }
+            assertArrayEquals(original,source.readBytes())
+            proof("translation-local-success.png")
+        }
+        root.deleteRecursively()
+    }
+
+    @Test
     fun nativePdfOverflowIsVisibleAndDoesNotPublishOutput() {
         val root = java.io.File(instrumentation.targetContext.cacheDir, "translation-ui-${System.nanoTime()}").apply { mkdirs() }
         val source = java.io.File(root, "source.pdf")
@@ -265,13 +296,14 @@ class ReaderControlsTest {
                 Result.success("Expansion ".repeat(100))
             }
             tapOwned("Documento / Paper completo")
+            tapOwned("Traducir en el dispositivo (ML Kit)")
             proof("translation-pdf-full-mode.png")
-            assertTrue(awaitContainingText("PDF: conserva páginas").text.toString().contains("hasta 15 %"))
-            tapOwned("Crear copia traducida")
+            assertTrue(awaitContainingText("PDF: sustituye cada párrafo").text.toString().contains("zona original"))
+            tapOwned("Crear copia con Google Translate")
             val deadline = SystemClock.uptimeMillis() + 20_000
             var error: String? = null
             while (SystemClock.uptimeMillis() < deadline && error == null) {
-                error = findNode("The complete translation does not fit at the permitted font size and leading")?.text?.toString()
+                error = findContainingText("La traducción completa no cabe")?.text?.toString()
                 if (error == null) SystemClock.sleep(40)
             }
             if (error == null) proof("translation-pdf-overflow-unexpected-state.png")
@@ -306,7 +338,7 @@ class ReaderControlsTest {
             tapOwned("Documento / Paper completo")
             proof("translation-kindle-full-mode.png")
             assertTrue(awaitContainingText("Kindle: requiere confirmar esta exportación a EPUB").text.toString().contains("reflujo"))
-            tapOwned("Crear copia traducida")
+            tapOwned("Crear copia con Google Translate")
             assertNotNull(awaitContainingText("Confirmar conversión Kindle a EPUB"))
             assertTrue(findNode("Confirmar EPUB y traducir") != null)
             proof("translation-kindle-consent.png")

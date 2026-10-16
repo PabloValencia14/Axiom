@@ -40,11 +40,13 @@ internal fun splitPdfShow(show: PdfShow): List<PdfTextRun> {
 }
 
 private val PDF_MATH_RUN = Regex(
-    "(?<![\\p{L}\\p{N}])(?:(?:\\p{L}\\d*|\\$?\\d+\\p{L}?)(?:\\s*[=×*+−/<>-]\\s*(?:\\p{L}\\d+|\\p{L}|\\$?\\d+\\p{L}?))+|[=×*+−/<>-]+)(?![\\p{L}\\p{N}])"
+    "\\ufffc|(?<![\\p{L}\\p{N}])(?:(?:\\p{L}[\\p{L}\\p{N}]*(?:\\^\\d+)?|\\$?\\d+\\p{L}?)(?:\\s*[=×*+−/<>-]\\s*(?:\\p{L}[\\p{L}\\p{N}]*(?:\\^\\d+)?|\\$?\\d+\\p{L}?))+|[=×*+−/<>-]+)(?![\\p{L}\\p{N}])"
 )
 
 private fun isProseDash(text: String, match: MatchResult): Boolean {
-    if ('-' !in match.value || match.value.any { it in "=×*+−/<>" } || match.value.count { it == '-' } != 1) return false
+    if ('-' !in match.value || match.value.any { it in "=×*+−/<>" }) return false
+    val words = match.value.split('-').map(String::trim)
+    if (words.all { it.length > 1 && it.all(Char::isLetter) }) return true
     val left = text.substring(0, match.range.first).trimEnd().takeLastWhile(Char::isLetter)
     val right = text.substring(match.range.last + 1).trimStart().takeWhile(Char::isLetter)
     return left.length > 1 && right.length > 1
@@ -80,7 +82,7 @@ internal fun hasSeparablePdfMath(text: String): Boolean {
 private val PDF_CITATION_AUTHOR = """\p{Lu}[\p{L}\p{M}\p{N}&.'’\-]*(?:\s+et\s+al\.)?(?:\s+&\s+\p{Lu}[\p{L}\p{M}\p{N}&.'’\-]*)*"""
 private val PDF_CITATION_YEAR = """(?:19|20)\d{2}[a-z]?"""
 private val PDF_CITATION = Regex(
-    """\((?:$PDF_CITATION_AUTHOR,\s*$PDF_CITATION_YEAR\s*;?\s*)+\)|$PDF_CITATION_AUTHOR,\s*$PDF_CITATION_YEAR|$PDF_CITATION_AUTHOR\s*\(\s*$PDF_CITATION_YEAR\s*\)"""
+    """https?://[^\s<>]+|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\((?:$PDF_CITATION_AUTHOR,\s*$PDF_CITATION_YEAR\s*;?\s*)+\)|$PDF_CITATION_AUTHOR,\s*$PDF_CITATION_YEAR|$PDF_CITATION_AUTHOR\s*\(\s*$PDF_CITATION_YEAR\s*\)"""
 )
 
 private fun pdfCitationGlyphs(container: PdfContainer): Set<Pair<PdfShow,Int>> {
@@ -145,7 +147,8 @@ internal sealed interface PdfParagraphPart {
     data class Text(
         override val text: String,
         override val glyphs: List<PdfGlyphRef>,
-        override val sourceStyle: PdfShow
+        override val sourceStyle: PdfShow,
+        val startsCell: Boolean = false
     ) : PdfParagraphPart
 
     data class MathAnchor(
@@ -178,13 +181,16 @@ private fun sameParagraphStyle(first: PdfShow, other: PdfShow): Boolean {
 }
 
 internal class PdfParagraph(val shows: MutableList<PdfShow>) {
-    val first get() = shows.minBy { it.operation.index }
+    val first get() = (shows.filter { !it.pageInk.isEmpty }.ifEmpty { shows }).minBy { it.operation.index }
     val basis: Matrix = first.firstMatrix!!.clone()
-    val inverse = pdfAndroidMatrix(basis).let { matrix -> android.graphics.Matrix().also {
+    val inverse = pdfAndroidMatrix(basis.multiply(first.state.currentTransformationMatrix)).let { matrix -> android.graphics.Matrix().also {
         if (!matrix.invert(it)) rejectPdf("Singular paragraph geometry", first.location)
     } }
-    fun relative(show: PdfShow): RectF = RectF(show.ink).also { inverse.mapRect(it) }
-    fun baseline(show: PdfShow): FloatArray = floatArrayOf(show.firstMatrix!!.translateX, show.firstMatrix!!.translateY).also { inverse.mapPoints(it) }
+    fun relative(show: PdfShow): RectF = RectF(show.pageInk).also { inverse.mapRect(it) }
+    fun baseline(show: PdfShow): FloatArray {
+        val matrix = show.firstMatrix!!.multiply(show.state.currentTransformationMatrix)
+        return floatArrayOf(matrix.translateX,matrix.translateY).also { inverse.mapPoints(it) }
+    }
     val size get() = first.state.textState.fontSize
     val box: RectF get() = RectF().also { result -> shows.forEach { result.union(relative(it)) } }
     val parts: List<PdfParagraphPart> by lazy(::buildParts)
@@ -195,6 +201,8 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
         val text = StringBuilder()
         val refs = mutableListOf<PdfGlyphRef?>()
         val styles = mutableListOf<PdfShow?>()
+        val layoutBreaks = sortedSetOf<Int>()
+        val cellShows = shows.filter { it.glyphs.any { glyph -> glyph.layoutBreakBefore } }.toSet()
         var previous: PdfGlyphRef? = null
         shows.sortedBy { it.operation.index }.forEach { show ->
             show.glyphs.forEachIndexed { index, glyph ->
@@ -202,7 +210,8 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
                 val old = previous
                 if (old != null) {
                     val lineBreak = abs(baseline(old.show)[1] - baseline(show)[1]) > size * .25f
-                    val joinsHyphenatedWord = lineBreak && text.lastOrNull() == '-' &&
+                    val cellLineBreak = lineBreak && (old.show in cellShows || show in cellShows)
+                    val joinsHyphenatedWord = lineBreak && !cellLineBreak && text.lastOrNull() == '-' &&
                         glyph.text.firstOrNull()?.isLowerCase() == true
                     if (joinsHyphenatedWord) {
                         text.deleteCharAt(text.lastIndex)
@@ -211,9 +220,10 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
                     } else {
                         val inferredGap = if (index > 0) glyph.inferredSpaceBefore else {
                             val inverse = android.graphics.Matrix()
-                            if (!pdfAndroidMatrix(old.glyph.matrix).invert(inverse))
+                            if (!pdfAndroidMatrix(old.glyph.matrix.multiply(old.show.state.currentTransformationMatrix)).invert(inverse))
                                 rejectPdf("Ambiguous glyph spacing", show.location)
-                            val nextPosition = floatArrayOf(glyph.matrix.translateX, glyph.matrix.translateY)
+                            val matrix = glyph.matrix.multiply(show.state.currentTransformationMatrix)
+                            val nextPosition = floatArrayOf(matrix.translateX, matrix.translateY)
                             inverse.mapPoints(nextPosition)
                             val textSize = old.show.state.textState.fontSize
                             val wordGap = maxOf(textSize * .15f,
@@ -228,6 +238,7 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
                             styles += show
                         }
                     }
+                    if (glyph.layoutBreakBefore || cellLineBreak) layoutBreaks += text.length
                 } else if (index > 0 && glyph.inferredSpaceBefore) {
                     text.append(' ')
                     refs += null
@@ -264,14 +275,21 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
         }
         var segmentStart=0
         while(segmentStart<text.length) {
+            val cellEnd = layoutBreaks.firstOrNull { it > segmentStart } ?: text.length
+            val cellText = text.substring(segmentStart,cellEnd).trim()
+            if (layoutBreaks.isNotEmpty() && cellText.any(Char::isDigit) && PDF_NUMERIC_CELL.matches(cellText)) {
+                appendAnchor(text.substring(segmentStart,cellEnd),segmentStart,cellEnd,false)
+                segmentStart=cellEnd
+                continue
+            }
             if(isCitationAt(segmentStart)) {
                 var end=segmentStart+1
-                while(end<text.length && isCitationAt(end)) end++
+                while(end<cellEnd && isCitationAt(end)) end++
                 appendAnchor(text.substring(segmentStart,end),segmentStart,end,true)
                 segmentStart=end
             } else {
                 var end=segmentStart+1
-                while(end<text.length && !isCitationAt(end)) end++
+                while(end<cellEnd && !isCitationAt(end)) end++
                 splitPdfText(text.substring(segmentStart,end)).forEach { segment ->
                     val start=segmentStart+segment.start
                     val stop=segmentStart+segment.end
@@ -283,7 +301,7 @@ internal class PdfParagraph(val shows: MutableList<PdfShow>) {
                             var textEnd=index+1
                             while(textEnd<stop && styles.getOrNull(textEnd)?.let { sameParagraphStyle(style,it) }==true) textEnd++
                             val glyphs=refs.subList(index,textEnd).filterNotNull().distinctBy { it.show to it.glyph }
-                            result+=PdfParagraphPart.Text(text.substring(index,textEnd),glyphs,style)
+                            result+=PdfParagraphPart.Text(text.substring(index,textEnd),glyphs,style,index in layoutBreaks)
                             index=textEnd
                         }
                     }
@@ -319,23 +337,60 @@ private fun separatedByPdfRule(paragraph: PdfParagraph, previous: PdfShow, next:
         horizontal || vertical
     }
 }
-private val PDF_EPOCH_GROUPING_BARRIERS = setOf("BMC", "BDC", "DP", "EMC", "Do", "BI", "sh", "W", "W*")
+private val PDF_EPOCH_GROUPING_BARRIERS = setOf("BMC", "BDC", "DP", "EMC", "Do", "BI", "sh", "W", "W*",
+    "S", "s", "f", "F", "f*", "B", "B*", "b", "b*")
+private val PDF_PROSE_PUNCTUATION = Regex("[\\s.,;:!?()\\[\\]“”‘’\"'…]+")
+private val PDF_NUMERIC_CELL = Regex("[\\d\\s.,%+\\-−±/():eE<>≤≥\$€£¥]+")
+private val PDF_NUMBERED_OPEN = Regex("\\d+\\s*\\(")
 
-private fun canJoinPdfEpochs(root: PdfContainer, paragraph: PdfParagraph, show: PdfShow): Boolean {
+private fun canJoinPdfEpochs(root: PdfContainer, paragraph: PdfParagraph, show: PdfShow, graphics: List<PdfGraphic>): Boolean {
     val previous = paragraph.shows.last()
     if (previous.epoch == show.epoch) return true
-    return root.operations.none { operation ->
+    val barriers = root.operations.filter { operation ->
         operation.index > previous.operation.index && operation.index < show.operation.index &&
             operation.operator.name in PDF_EPOCH_GROUPING_BARRIERS
     }
+    if (barriers.isEmpty()) return true
+    if (barriers.any { it.operator.name !in setOf("S", "s") }) return false
+    val a = paragraph.baseline(previous); val b = paragraph.baseline(show)
+    val glyph = previous.glyphs.lastOrNull() ?: return false
+    if (previous.text.lastOrNull()?.isLetter() != true || show.text.firstOrNull()?.isLetter() != true ||
+        abs(a[1]-b[1]) > paragraph.size*.05f ||
+        abs(paragraph.relative(show).left-paragraph.relative(previous).right) > paragraph.size*.2f) return false
+    val painted = graphics.filter { it.paintOrder > previous.paintOrder && it.paintOrder < show.paintOrder }
+    if (painted.isEmpty()) return false
+    val inverse = android.graphics.Matrix()
+    if (!pdfAndroidMatrix(paragraph.basis.multiply(previous.state.currentTransformationMatrix)).invert(inverse)) return false
+    val lastGlyph = RectF(glyph.pageInk).also(inverse::mapRect).apply { inset(-paragraph.size*.4f,-paragraph.size*.4f) }
+    if (painted.any { graphic ->
+        val line = RectF(graphic.bounds).also(inverse::mapRect)
+        !graphic.isStrokeRule || line.height() > paragraph.size*.1f ||
+            line.centerY() !in (a[1]-paragraph.size*.4f)..a[1] ||
+            line.width() > paragraph.size*2f || !RectF.intersects(lastGlyph,line)
+    }) return false
+    // A stroke between touching word fragments is an underline, not a paragraph boundary.
+    painted.forEach { it.textDecoration = true }
+    return true
 }
 
-internal fun groupPdfParagraphs(root: PdfContainer, rules: List<PdfRule> = root.rules): List<PdfParagraph> {
+internal fun groupPdfParagraphs(root: PdfContainer, rules: List<PdfRule> = root.rules, graphics: List<PdfGraphic> = root.graphics): List<PdfParagraph> {
     root.citationGlyphs=pdfCitationGlyphs(root)
     val result = mutableListOf<PdfParagraph>()
+    val wordPrefixes = root.shows.zipWithNext().mapNotNull { (prefix, next) ->
+        if (!prefix.visible || !next.visible || !PDF_SINGLE_LETTER.matches(prefix.text) ||
+            !linguisticPdfText(next.text.toString(),next.state.textState.font) ||
+            !sameParagraphStyle(prefix,next)) return@mapNotNull null
+        val last = prefix.glyphs.lastOrNull() ?: return@mapNotNull null
+        val matrix = android.graphics.Matrix()
+        if (!pdfAndroidMatrix(last.matrix).invert(matrix)) return@mapNotNull null
+        val position = floatArrayOf(next.firstMatrix!!.translateX,next.firstMatrix!!.translateY)
+        matrix.mapPoints(position)
+        val size = prefix.state.textState.fontSize
+        if (abs(position[1]) <= size*.05f && abs(position[0]-last.advance) <= size*.15f) prefix else null
+    }.toSet()
     val eligible = root.shows.filter { show ->
         show.visible && show.text.isNotBlank() &&
-            (linguisticPdfText(show.text.toString(), show.state.textState.font) ||
+            (show in wordPrefixes || PDF_PROSE_PUNCTUATION.matches(show.text) || PDF_NUMBERED_OPEN.matches(show.text.toString().trim()) || linguisticPdfText(show.text.toString(), show.state.textState.font) ||
                 splitPdfText(show.text.toString()).any { it.isMathematics })
     }
     eligible.forEach { show ->
@@ -346,12 +401,13 @@ internal fun groupPdfParagraphs(root: PdfContainer, rules: List<PdfRule> = root.
             }
             if (!showHasProse && !paragraphHasProse) return@filter false
             val first = paragraph.first
-            val showMatrix=show.firstMatrix!!
-            val firstMatrix=first.firstMatrix!!
-            if (!canJoinPdfEpochs(root, paragraph, show) ||
+            val showMatrix=show.firstMatrix!!.multiply(show.state.currentTransformationMatrix)
+            val firstMatrix=first.firstMatrix!!.multiply(first.state.currentTransformationMatrix)
+            if (first.renderingMode != show.renderingMode ||
+                (first.renderingMode != 0 && !sameParagraphStyle(first, show)) ||
+                !canJoinPdfEpochs(root, paragraph, show, graphics) ||
                 showMatrix.scaleY != firstMatrix.scaleY ||
-                showMatrix.shearX != firstMatrix.shearX || showMatrix.shearY != firstMatrix.shearY ||
-                show.state.currentTransformationMatrix != first.state.currentTransformationMatrix) false
+                showMatrix.shearX != firstMatrix.shearX || showMatrix.shearY != firstMatrix.shearY) false
             else {
                 val p = paragraph.baseline(show)
                 val last = paragraph.shows.last()
@@ -365,42 +421,68 @@ internal fun groupPdfParagraphs(root: PdfContainer, rules: List<PdfRule> = root.
                 }
                 val alignedStart = abs(p[0]) <= paragraph.size*.75f
                 val alignedCenter = abs(r.centerX()-previousLine.centerX()) <= paragraph.size*.75f
-                val nextLine = showHasProse && paragraphHasProse &&
-                    p[1] < q[1]-paragraph.size*.5f && q[1]-p[1] <= paragraph.size*1.8f &&
-                    (alignedStart || alignedCenter)
-                val decorationBetween = root.shows.any { other ->
+                val interleavedCell = root.shows.any { other ->
                     other.visible && other.operation.index > last.operation.index && other.operation.index < show.operation.index &&
+                        other !in paragraph.shows && linguisticPdfText(other.text.toString(),other.state.textState.font) &&
+                        minOf(abs(paragraph.baseline(other)[1]-q[1]),abs(paragraph.baseline(other)[1]-p[1])) <= paragraph.size*.25f &&
+                        (paragraph.relative(other).left > previousLine.right+paragraph.size*1.2f ||
+                            paragraph.relative(other).right < previousLine.left-paragraph.size*1.2f)
+                }
+                val nextLine = showHasProse && paragraphHasProse &&
+                    abs(show.state.textState.fontSize-paragraph.size) <= paragraph.size*.05f &&
+                    paragraph.shows.any { it.state.textState.font == show.state.textState.font &&
+                        linguisticPdfText(it.text.toString(),it.state.textState.font) } &&
+                    p[1] < q[1]-paragraph.size*.5f && q[1]-p[1] <= paragraph.size*1.8f &&
+                    (alignedStart || alignedCenter) && !interleavedCell
+                val decorationBetween = root.shows.any { other ->
+                    other.visible && other.text.isNotBlank() && !PDF_PROSE_PUNCTUATION.matches(other.text) &&
+                        other.operation.index > last.operation.index && other.operation.index < show.operation.index &&
                         !linguisticPdfText(other.text.toString(),other.state.textState.font) &&
                         other !in paragraph.shows && !splitPdfText(other.text.toString()).any { it.isMathematics }
                 }
                 (sameLine || nextLine) && !decorationBetween && !separatedByPdfRule(paragraph,last,show,rules)
             }
         }
-        val resolvedCandidates=if(candidates.size<=1) candidates else candidates.filter { paragraph ->
+        val sameLineCandidates=if(candidates.size<=1) candidates else candidates.filter { paragraph ->
             val previous=paragraph.shows.last()
             val p=paragraph.baseline(show); val q=paragraph.baseline(previous)
             val r=paragraph.relative(show); val old=paragraph.relative(previous)
             abs(p[1]-q[1])<=paragraph.size*.25f &&
                 r.left>=old.right-paragraph.size*.1f && r.left-old.right<=paragraph.size*1.2f
         }
+        val distances = if (sameLineCandidates.isNotEmpty()) {
+            sameLineCandidates.map { paragraph ->
+                paragraph to abs(paragraph.relative(show).left-paragraph.relative(paragraph.shows.last()).right)
+            }
+        } else {
+            candidates.map { paragraph ->
+                paragraph to abs(paragraph.baseline(show)[1] - paragraph.baseline(paragraph.shows.last())[1])
+            }
+        }
+        val nearest = distances.minOfOrNull { it.second }
+        val resolvedCandidates = distances.filter { abs(it.second-(nearest ?: 0f)) < .01f }.map { it.first }
         if(resolvedCandidates.size>1) rejectPdf("Ambiguous paragraph or column association",show.location)
         if(resolvedCandidates.isEmpty()) result+=PdfParagraph(mutableListOf(show))
         else resolvedCandidates.single().shows+=show
     }
+    wordPrefixes.forEach { prefix ->
+        val next = root.shows[root.shows.indexOf(prefix)+1]
+        if (result.none { prefix in it.shows && next in it.shows })
+            rejectPdf("A word split by artwork cannot be translated safely",prefix.location)
+    }
     result.forEach { paragraph ->
         paragraph.shows.forEach { show ->
-            val a = paragraph.basis; val b = show.firstMatrix!!
+            val a = paragraph.basis.multiply(paragraph.first.state.currentTransformationMatrix)
+            val b = show.firstMatrix!!.multiply(show.state.currentTransformationMatrix)
             if (a.scaleY != b.scaleY || a.shearX != b.shearX || a.shearY != b.shearY)
                 rejectPdf("Changing paragraph orientation or scale", show.location)
         }
-        // Composition retains the complete source artwork, so overlapping source shows and anchors
-        // are retained rather than rejected for same-position replacement.
     }
-    root.children.values.forEach { result += groupPdfParagraphs(it,rules) }
+    root.children.values.forEach { result += groupPdfParagraphs(it,rules,graphics) }
     return result
 }
 internal sealed interface PdfTranslatedPart {
-    data class Text(val text: String, val sourceStyle: PdfShow) : PdfTranslatedPart
+    data class Text(val text: String, val sourceStyle: PdfShow, val glyphs: List<PdfGlyphRef>) : PdfTranslatedPart
     data class Protected(val anchor: PdfProtectedAnchor) : PdfTranslatedPart
 }
 
@@ -409,13 +491,18 @@ internal fun PdfParagraph.translationParts(): List<PdfTranslatedPart> {
     val baseStyle = parts.filterIsInstance<PdfParagraphPart.Text>().firstOrNull()?.sourceStyle ?: first
     val result = mutableListOf<PdfTranslatedPart>()
     var prose = StringBuilder()
+    var glyphs = mutableListOf<PdfGlyphRef>()
     fun flush() {
-        if (prose.isNotEmpty()) result += PdfTranslatedPart.Text(prose.toString(), baseStyle)
+        if (prose.isNotEmpty()) result += PdfTranslatedPart.Text(prose.toString(), glyphs.firstOrNull()?.show ?: baseStyle, glyphs.distinctBy { it.show to it.index })
         prose = StringBuilder()
+        glyphs = mutableListOf()
     }
     parts.forEach { part ->
         when (part) {
-            is PdfParagraphPart.Text -> prose.append(part.text)
+            is PdfParagraphPart.Text -> {
+                if (part.startsCell) flush()
+                prose.append(part.text); glyphs += part.glyphs
+            }
             is PdfParagraphPart.MathAnchor -> {
                 flush()
                 result += PdfTranslatedPart.Protected(part)
@@ -427,6 +514,17 @@ internal fun PdfParagraph.translationParts(): List<PdfTranslatedPart> {
         }
     }
     flush()
+    // Joined line-end hyphens disappear from provider text but must also disappear from the PDF.
+    val represented = parts.flatMap { it.glyphs }.map { it.glyph }.toSet()
+    shows.forEach { show -> show.glyphs.forEachIndexed { index, glyph ->
+        if (glyph !in represented) {
+            val chunk = result.indexOfLast { part -> part is PdfTranslatedPart.Text &&
+                part.glyphs.any { it.show.operation.index < show.operation.index || (it.show === show && it.index < index) } }
+            if (glyph.text != "-" || chunk < 0) rejectPdf("Unassigned source glyph in translated paragraph", show.location)
+            val part = result[chunk] as PdfTranslatedPart.Text
+            result[chunk] = part.copy(glyphs = part.glyphs + PdfGlyphRef(show, glyph, index))
+        }
+    } }
     return result
 }
 
@@ -463,8 +561,9 @@ internal class PdfTranslationFonts(private val context: Context, private val doc
         if (!original.willBeSubset() && usable(original)) return original
         val descriptor = original.fontDescriptor
         val name = original.name.lowercase()
-        val bold = descriptor?.isForceBold == true || (descriptor?.fontWeight ?: 0f) >= 600f || name.contains("bold")
-        val italic = descriptor?.isItalic == true || name.contains("italic") || name.contains("oblique")
+        val bold = descriptor?.isForceBold == true || (descriptor?.fontWeight ?: 0f) >= 600f || name.contains("bold") ||
+            (name.contains("nimbus") && (name.endsWith("-medi") || name.endsWith("-mediital")))
+        val italic = descriptor?.isItalic == true || name.contains("italic") || name.contains("oblique") || name.endsWith("ital")
         val family = if (descriptor?.isSerif == true || name.contains("times") || name.contains("serif") || name.contains("nimbusrom")) "LiberationSerif" else "LiberationSans"
         val style = when { bold && italic -> "BoldItalic"; bold -> "Bold"; italic -> "Italic"; else -> "Regular" }
         val cjk = text.any { it in '\u2e80'..'\u9fff' || it in '\uf900'..'\ufaff' }
