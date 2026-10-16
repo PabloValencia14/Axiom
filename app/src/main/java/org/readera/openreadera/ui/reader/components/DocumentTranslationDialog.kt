@@ -6,6 +6,9 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +22,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,10 +38,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.readera.openreadera.data.scanner.StorageScanner
+import org.readera.openreadera.R
 import org.readera.openreadera.engine.DocumentFormat
 import org.readera.openreadera.translation.DocumentTranslationCoordinator
 import org.readera.openreadera.translation.GoogleTranslateService
 import org.readera.openreadera.translation.NativeTextTranslator
+import org.readera.openreadera.translation.OnDeviceDocumentTranslator
 import org.readera.openreadera.translation.ResolvedTranslationSource
 import org.readera.openreadera.translation.TranslationRejectedException
 import java.io.File
@@ -53,6 +61,7 @@ fun DocumentTranslationDialog(
     outputDirectory: File? = null
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
     val coordinator = remember(context) { DocumentTranslationCoordinator(context) }
     var source by remember(sourcePath) { mutableStateOf<ResolvedTranslationSource?>(null) }
@@ -71,6 +80,9 @@ fun DocumentTranslationDialog(
     var selectedMode by remember { mutableIntStateOf(0) } // 0: Página actual, 1: Libro/Paper completo
     var targetLang by remember { mutableStateOf("es") }
     var showLangMenu by remember { mutableStateOf(false) }
+    var useLocalTranslation by remember { mutableStateOf(true) }
+    var sourceLanguage by remember { mutableStateOf("en") }
+    var showSourceLanguages by remember { mutableStateOf(false) }
 
     // Page translation states
     var isTranslatingPage by remember { mutableStateOf(false) }
@@ -104,14 +116,21 @@ fun DocumentTranslationDialog(
             fullTranslationJob = scope.launch {
                 var generated: File? = null
                 var handedOff = false
+                var local: OnDeviceDocumentTranslator? = null
                 try {
+                    if (useLocalTranslation) {
+                        fullStatusMessage = "Preparando modelos locales; la primera descarga requiere Wi-Fi..."
+                        local = OnDeviceDocumentTranslator(sourceLanguage, language)
+                        local.prepare()
+                    }
+                    val localClient = local
                     val copy = coordinator.translateCopy(
                         source = resolved,
                         outputDirectory = outputDirectory ?: StorageScanner.getAppBooksDirectory(),
                         title = bookTitle,
                         targetLanguage = language,
                         kindleConversionConfirmed = kindleConfirmed,
-                        translate = translate,
+                        translate = if (localClient == null) translate else { text, _ -> localClient.translateText(text) },
                         onProgress = { done, total ->
                             fullProgress = if (total > 0) done.toFloat() / total else 0f
                             fullStatusMessage = "Traduciendo bloque $done de $total..."
@@ -126,6 +145,7 @@ fun DocumentTranslationDialog(
                 } catch (error: Exception) {
                     fullError = error
                 } finally {
+                    local?.close()
                     if (!handedOff) generated?.delete()
                     isTranslatingFull = false
                 }
@@ -228,9 +248,19 @@ fun DocumentTranslationDialog(
                     }
                 }
                 Text(
-                    text = "Al traducir, el texto se envía a Google Translate y se requiere Internet. La copia completa se añade a la biblioteca; si tienes la sincronización automática de Drive activada y conectada, también se subirá a Google Drive.",
+                    text = (if (selectedMode == 1 && useLocalTranslation)
+                        "La traducción local usa ML Kit (Google Translate). Descarga modelos por Wi-Fi la primera vez; después procesa el texto en el dispositivo. Revisa la terminología científica. "
+                    else "Al traducir, el texto se envía a Google Translate y se requiere Internet. ") +
+                        "La copia completa se añade a la biblioteca; si tienes la sincronización automática de Drive activada y conectada, también se subirá a Google Drive.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Image(
+                    painter = painterResource(R.drawable.google_translate_attribution),
+                    contentDescription = "Traducción automática de Google Translate; abrir información",
+                    modifier = Modifier.clickable { uriHandler.openUri("https://translate.google.com") }
+                        .background(Color.White).padding(horizontal = 8.dp, vertical = 16.dp)
+                        .size(width = 176.dp, height = 16.dp)
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -426,6 +456,26 @@ fun DocumentTranslationDialog(
 
                                 Spacer(modifier = Modifier.height(18.dp))
 
+                                Row(modifier = Modifier.fillMaxWidth().toggleable(
+                                    value = useLocalTranslation, role = Role.Checkbox,
+                                    onValueChange = { useLocalTranslation = it }),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(checked = useLocalTranslation, onCheckedChange = null)
+                                    Text("Traducir en el dispositivo (ML Kit)")
+                                }
+                                if (useLocalTranslation) {
+                                    Box {
+                                        OutlinedButton(onClick = { showSourceLanguages = true }) {
+                                            Text("Origen: " + GoogleTranslateService.supportedLanguages.first { it.first == sourceLanguage }.second)
+                                        }
+                                        DropdownMenu(expanded = showSourceLanguages, onDismissRequest = { showSourceLanguages = false }) {
+                                            GoogleTranslateService.supportedLanguages.forEach { (code, name) ->
+                                                DropdownMenuItem(text = { Text(name) }, onClick = { sourceLanguage = code; showSourceLanguages = false })
+                                            }
+                                        }
+                                    }
+                                }
+
                                 Button(
                                     onClick = {
                                         if (source?.format?.let { DocumentTranslationCoordinator.requiresKindleConversion(it) } == true) {
@@ -438,7 +488,7 @@ fun DocumentTranslationDialog(
                                 ) {
                                     Icon(Icons.Default.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Text("Crear copia traducida")
+                                    Text("Crear copia con Google Translate")
                                 }
                             }
                         } else if (isTranslatingFull) {
@@ -548,7 +598,7 @@ fun DocumentTranslationDialog(
             onDismissRequest = { showKindleConfirmation = false },
             title = { Text("Confirmar conversión Kindle a EPUB") },
             text = {
-                Text("Esta exportación convertirá ${source?.format?.displayName ?: "Kindle"} a EPUB y enviará su texto a Google Translate en $langName. El EPUB permite reflujo y no conserva el formato Kindle ni su paginación. El original quedará intacto. La copia se indexará y se subirá a Drive si la sincronización automática está activada y conectada.")
+                Text("Esta exportación convertirá ${source?.format?.displayName ?: "Kindle"} a EPUB y lo traducirá a $langName ${if (useLocalTranslation) "en el dispositivo con ML Kit" else "enviando su texto a Google Translate"}. El EPUB permite reflujo y no conserva el formato Kindle ni su paginación. El original quedará intacto. La copia se indexará y se subirá a Drive si la sincronización automática está activada y conectada.")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -565,7 +615,7 @@ fun DocumentTranslationDialog(
 
 internal fun nativeTranslationFidelityInfo(format: DocumentFormat, suffix: String): String {
     val fidelity = when (format) {
-        DocumentFormat.PDF -> "PDF: conserva el contenido original vectorial y coloca su traducción debajo en las bandas correspondientes; amplía la página para mostrar el texto completo sin reducir la fuente."
+        DocumentFormat.PDF -> "PDF: sustituye cada párrafo dentro de su zona original y conserva las páginas, imágenes y gráficos en su posición. Puede reducir la letra y el interlineado; algunos bloques pueden necesitar ampliar la página. Si el texto completo no cabe sin solaparse, cancela la exportación e indica el bloque afectado."
         DocumentFormat.DOCX -> "DOCX: conserva la estructura editable, estilos, tablas e imágenes; Word puede repaginar el texto traducido."
         DocumentFormat.EPUB -> "EPUB: conserva estructura, estilos, imágenes y recursos; permite reflujo del texto y cambios de paginación."
         DocumentFormat.FB2 -> "FB2: conserva la estructura, el formato y las imágenes; el lector puede redistribuir el texto."
@@ -576,5 +626,8 @@ internal fun nativeTranslationFidelityInfo(format: DocumentFormat, suffix: Strin
     return "$fidelity Solo se traduce texto nativo seleccionable; no se reconstruyen escaneos ni se sustituyen imágenes. El original permanece intacto."
 }
 
-internal fun documentTranslationErrorMessage(error: Exception): String =
-    error.message.orEmpty().ifBlank { "No se pudo generar el documento traducido." }
+internal fun documentTranslationErrorMessage(error: Exception): String {
+    val message = error.message.orEmpty().ifBlank { "No se pudo generar el documento traducido." }
+    val location = (error as? TranslationRejectedException)?.location
+    return if (location.isNullOrBlank()) message else "$message\nUbicación: $location"
+}

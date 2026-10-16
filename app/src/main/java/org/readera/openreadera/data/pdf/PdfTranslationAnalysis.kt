@@ -12,6 +12,7 @@ import com.tom_roush.pdfbox.pdfparser.PDFStreamParser
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDResources
 import com.tom_roush.pdfbox.pdmodel.font.*
+import com.tom_roush.pdfbox.pdmodel.font.encoding.GlyphList
 import com.tom_roush.pdfbox.pdmodel.graphics.blend.BlendMode
 import com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 import com.tom_roush.pdfbox.pdmodel.graphics.form.PDTransparencyGroup
@@ -35,6 +36,15 @@ private val PDF_LINGUISTIC_TEXT = Regex("[\\p{IsLatin}\\p{IsCyrillic}]{2,}|[\\p{
 
 internal fun rejectPdf(reason: String, location: String): Nothing =
     throw TranslationRejectedException(reason, location)
+
+internal fun isOpaquePdfMathGlyph(name: String): Boolean {
+    val base = name.replace(Regex("[0-9]+$"), "")
+    if (base == "negationslash" || base == "prime") return true
+    val value = GlyphList.getAdobeGlyphList().toUnicode(base) ?: return false
+    return value.codePoints().allMatch {
+        Character.getType(it) == Character.MATH_SYMBOL.toInt() || Character.UnicodeScript.of(it) == Character.UnicodeScript.GREEK
+    }
+}
 
 internal data class PdfOperation(val index: Int, val operands: List<COSBase>, val operator: Operator)
 internal class PdfContainer(
@@ -66,7 +76,8 @@ internal data class PdfGlyph(
     val localInk: RectF,
     val pageInk: RectF,
     val advance: Float,
-    val inferredSpaceBefore: Boolean
+    val inferredSpaceBefore: Boolean,
+    val layoutBreakBefore: Boolean
 )
 internal class PdfShow(
     val container: PdfContainer,
@@ -120,7 +131,9 @@ internal class PdfShow(
     val location get() = "${container.id}/operator ${operation.index}"
 }
 
-internal data class PdfGraphic(val bounds: RectF, val region: Region, val paintOrder: Int)
+internal data class PdfGraphic(val bounds: RectF, val region: Region, val paintOrder: Int, val isStrokeRule: Boolean = false) {
+    var textDecoration = false
+}
 internal data class PdfRule(val from: PointF, val to: PointF)
 
 /** Inspect alternate-text and optional-content channels without walking page/parent back references. */
@@ -309,8 +322,9 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
     override fun showGlyph(matrix: Matrix, font: PDFont, code: Int, displacement: Vector) {
         val show = container.active ?: rejectPdf("Glyph has no stable text operator", container.id)
         if (show.firstMatrix == null) {
-            // Quote operators mutate T* and optional Tw/Tc before the glyph callback.
-            show.before=textMatrix.clone()
+            // Quotes mutate T* first; TJ's initial kerning must remain outside the saved pre-operator position.
+            if (show.operation.operator.name == "'" || show.operation.operator.name == "\"")
+                show.before=textMatrix.clone()
             show.lineAtShow=textLineMatrix.clone()
             show.state=graphicsState.clone()
         }
@@ -321,8 +335,12 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
         if (font.isVertical) rejectPdf("Vertical text needs an unsupported layout engine", show.location)
         if (font.isDamaged || (!font.isEmbedded && !font.isStandard14))
             rejectPdf("Damaged or non-embedded nonstandard fonts have unsafe substitute metrics", show.location)
-        val unicode = font.toUnicode(code)
-        if (unicode.isNullOrEmpty() || unicode.contains('\ufffd')) rejectPdf("Native text has no reliable Unicode mapping", show.location)
+        val mapped = font.toUnicode(code)
+        // An opaque math glyph keeps its original bytes and outline; the marker never reaches translation.
+        val unicode = if (mapped.isNullOrEmpty() || mapped.contains('\ufffd')) {
+            if (font is PDSimpleFont && isOpaquePdfMathGlyph(font.encoding.getName(code))) "\ufffc"
+            else rejectPdf("Native text has no reliable Unicode mapping (font=${font.name}, code=$code, glyph=${(font as? PDSimpleFont)?.encoding?.getName(code)})", show.location)
+        } else mapped
         if (textState.renderingMode.intValue() >= 4) rejectPdf("Text clipping cannot be translated safely", show.location)
         if (textState.renderingMode.intValue() == 3) {
             invisibleText = true
@@ -334,12 +352,8 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
         if (renderingMode != 0) {
             if (state.strokingColor.patternName != null)
                 rejectPdf("Pattern-stroked text is unsupported", show.location)
-            val ctm = state.currentTransformationMatrix
-            val textScale = minOf(kotlin.math.hypot(textMatrix.scaleX, textMatrix.shearY),
-                kotlin.math.hypot(textMatrix.shearX, textMatrix.scaleY)) * textState.fontSize
-            val ctmScale = maxOf(kotlin.math.hypot(ctm.scaleX, ctm.shearY),
-                kotlin.math.hypot(ctm.shearX, ctm.scaleY))
-            val expansion = state.lineWidth * ctmScale * state.miterLimit / (2f * textScale)
+            // Local outlines already include the font/text matrix; stroke width is in user-space units.
+            val expansion = state.lineWidth * state.miterLimit / 2f
             if (!expansion.isFinite() || expansion < 0f)
                 rejectPdf("Text stroke geometry cannot be bounded safely", show.location)
             show.strokeExpansion = maxOf(show.strokeExpansion, expansion)
@@ -372,12 +386,14 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
             show.pageInk.union(bounds)
         }
         var inferredSpaceBefore=false
+        var layoutBreakBefore=false
         show.previousGlyph?.let { previous ->
             val inverse = android.graphics.Matrix()
             if (!pdfAndroidMatrix(previous).invert(inverse)) rejectPdf("Ambiguous glyph advance",show.location)
             val position = floatArrayOf(textMatrix.translateX,textMatrix.translateY)
             inverse.mapPoints(position)
             val gap = position[0]-show.previousAdvance
+            layoutBreakBefore = abs(position[1]) <= textState.fontSize*.25f && gap > textState.fontSize*.9f
             val wordGap = maxOf(textState.fontSize*.15f,font.spaceWidth*textState.fontSize/1000f*.45f)
             if (abs(position[1]) <= textState.fontSize*.25f && gap > wordGap &&
                 show.text.isNotEmpty() && !show.text.last().isWhitespace() && !unicode.first().isWhitespace()) {
@@ -389,7 +405,7 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
         show.text.append(unicode)
         show.glyphs += PdfGlyph(unicode,textStart,show.text.length,textMatrix.clone(),show.takeSourceCode(code),
             RectF(localBounds),RectF(bounds),displacement.x*textState.fontSize + textState.characterSpacing +
-                if (code==32) textState.wordSpacing else 0f,inferredSpaceBefore)
+                if (code==32) textState.wordSpacing else 0f,inferredSpaceBefore,layoutBreakBefore)
         show.previousGlyph = textMatrix.clone()
         show.previousAdvance = displacement.x*textState.fontSize + textState.characterSpacing
         if (show.firstMatrix == null) show.firstMatrix = textMatrix.clone()
@@ -435,6 +451,7 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
             val text = show.text.toString()
             if (PDF_LATIN_PROSE.containsMatchIn(text) &&
                 text.any { it in '\u2200'..'\u22ff' || it in '\u0370'..'\u03ff' || it == '=' } &&
+                splitPdfText(text).any { !it.isMathematics && PDF_LATIN_PROSE.containsMatchIn(it.text) } &&
                 !hasSeparablePdfMath(text))
                 rejectPdf("Prose and mathematical tokens share an inseparable text operator", show.location)
             text.codePoints().forEach { code ->
@@ -444,12 +461,12 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
             }
         }
     }
-    private fun recordGraphic(outline: Path) {
+    private fun recordGraphic(outline: Path, isStrokeRule: Boolean = false) {
         val bounds=RectF(); outline.computeBounds(bounds,true)
         if (bounds.isEmpty) return
         val region=Region()
         region.setPath(outline,graphicsState.currentClippingPath)
-        root.graphics += PdfGraphic(bounds,region,++paintOrder)
+        root.graphics += PdfGraphic(bounds,region,++paintOrder,isStrokeRule)
     }
     private fun rectangleRules(a: PointF,b: PointF,c: PointF,d: PointF) {
         pendingRules += PdfRule(a,b); pendingRules += PdfRule(b,c)
@@ -480,7 +497,7 @@ internal class PdfTranslationAnalyzer(page: PDPage, pageIndex: Int) : PDFGraphic
             style=Paint.Style.STROKE; strokeWidth=transformWidth(graphicsState.lineWidth).coerceAtLeast(.1f)
             strokeCap=graphicsState.lineCap; strokeJoin=graphicsState.lineJoin; strokeMiter=graphicsState.miterLimit
         }.getFillPath(path,ink)
-        recordGraphic(ink); root.rules.addAll(pendingRules)
+        recordGraphic(ink,pendingRules.size == 1); root.rules.addAll(pendingRules)
     }
     private fun recordFill(windingRule: Path.FillType) {
         path.fillType=windingRule; recordGraphic(path)

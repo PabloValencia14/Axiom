@@ -55,6 +55,102 @@ class PdfReadingTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
 
     @Test
+    fun realPaperWithSelectedProvider() = runBlocking {
+        val path = InstrumentationRegistry.getArguments().getString("translationPdfPath")
+        org.junit.Assume.assumeTrue("Supply translationPdfPath to explicitly enable the real provider test", path != null)
+        val provider = InstrumentationRegistry.getArguments().getString("translationEngine") ?: "local"
+        require(provider == "google" || provider == "local")
+        val context = instrumentation.targetContext
+        val source = File(checkNotNull(path))
+        val hash = MessageDigest.getInstance("SHA-256").digest(source.readBytes())
+        val evidence = File(context.getExternalFilesDir(null), "live-translation-${System.nanoTime()}").apply { check(mkdirs()) }
+        fun report(message: String) = instrumentation.sendStatus(0, Bundle().apply { putString("stream", "$message\n") })
+        report("Real provider=$provider evidence: ${evidence.path}")
+        var local: org.readera.openreadera.translation.OnDeviceDocumentTranslator? = null
+        try {
+            if (provider == "local") {
+                val client = org.readera.openreadera.translation.OnDeviceDocumentTranslator("en", "es")
+                local = client
+                report("Preparing local models over Wi-Fi")
+                withTimeout(180_000) { client.prepare() }
+            }
+            val localClient = local
+            val coordinator = DocumentTranslationCoordinator(context)
+            var responses = 0
+            var protectedGlyphs = 0
+            val output = coordinator.translateCopy(
+                coordinator.resolveSource(source.path), evidence, "Real paper", "es",
+                translate = { text, language ->
+                    (localClient?.translateText(text)
+                        ?: org.readera.openreadera.translation.GoogleTranslateService.translateText(text, language)).also {
+                        if (it.isSuccess) {
+                            responses++
+                            File(evidence, "responses.jsonl").appendText(org.json.JSONObject()
+                                .put("source", text).put("translated", it.getOrThrow()).toString() + "\n")
+                        }
+                        report("$provider completed responses=$responses")
+                    }
+                },
+                onProgress = { done, total -> report("Paragraphs=$done/$total") }
+            )
+            PDDocument.load(source).use { before -> PDDocument.load(output).use { after ->
+                assertEquals(before.numberOfPages, after.numberOfPages)
+                for (page in 0 until before.numberOfPages) {
+                    val originalRoot = org.readera.openreadera.data.pdf.PdfTranslationAnalyzer(before.getPage(page), page).analyze()
+                    val translatedRoot = org.readera.openreadera.data.pdf.PdfTranslationAnalyzer(after.getPage(page), page).analyze()
+                    assertEquals("Page ${page+1} artwork bounds changed", originalRoot.graphics.map { it.bounds }, translatedRoot.graphics.map { it.bounds })
+                    assertEquals("Page ${page+1} artwork regions changed", originalRoot.graphics.map { it.region }, translatedRoot.graphics.map { it.region })
+                    val retained = org.readera.openreadera.data.pdf.allPdfShows(translatedRoot)
+                    org.readera.openreadera.data.pdf.groupPdfParagraphs(originalRoot).flatMap { it.parts }
+                        .filterIsInstance<org.readera.openreadera.data.pdf.PdfProtectedAnchor>()
+                        .flatMap { it.glyphs }.distinctBy { it.show to it.index }.forEach { ref ->
+                            protectedGlyphs++
+                            val glyph = ref.glyph
+                            val nearest = retained.filter { it.state.textState.font.name == ref.show.state.textState.font.name }
+                                .flatMap { it.glyphs }.filter { it.sourceCode.contentEquals(glyph.sourceCode) }
+                                .minByOrNull { kotlin.math.abs(it.pageInk.left-glyph.pageInk.left)+kotlin.math.abs(it.pageInk.top-glyph.pageInk.top) }
+                            assertTrue("Protected glyph '${glyph.text}' moved on page ${page+1} at ${ref.show.location}: font=${ref.show.state.textState.font.name} bounds=${glyph.pageInk} nearest=${nearest?.pageInk}", retained.any { candidate ->
+                                candidate.state.textState.font.name == ref.show.state.textState.font.name && candidate.glyphs.any {
+                                    it.sourceCode.contentEquals(glyph.sourceCode) &&
+                                        kotlin.math.abs(it.pageInk.left-glyph.pageInk.left) < .01f &&
+                                        kotlin.math.abs(it.pageInk.top-glyph.pageInk.top) < .01f &&
+                                        kotlin.math.abs(it.pageInk.right-glyph.pageInk.right) < .01f &&
+                                        kotlin.math.abs(it.pageInk.bottom-glyph.pageInk.bottom) < .01f
+                                }
+                            })
+                    }
+                }
+            } }
+            val original = AndroidPdfEngine(context)
+            val translated = AndroidPdfEngine(context)
+            try {
+                assertTrue(original.open(source.path))
+                assertTrue(translated.open(output.path))
+                assertEquals(original.getPageCount(), translated.getPageCount())
+                for (page in 0 until original.getPageCount()) {
+                    val size = original.getPageSize(page)
+                    assertEquals(size, translated.getPageSize(page))
+                    val bitmap = Bitmap.createBitmap(1400, (1400 * size.height / size.width).toInt(), Bitmap.Config.ARGB_8888)
+                    try {
+                        for ((name, engine) in listOf("original" to original, "translated" to translated)) {
+                            assertTrue(engine.renderPage(page, bitmap, RenderOptions()))
+                            File(evidence, "$name-${page + 1}.png").outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                        }
+                    } finally { bitmap.recycle() }
+                }
+                check(responses > 0)
+                report("Real $provider success: pages=${translated.getPageCount()} responses=$responses protectedGlyphs=$protectedGlyphs output=${output.path}")
+            } finally { original.close(); translated.close() }
+        } catch (failure: org.readera.openreadera.translation.TranslationRejectedException) {
+            report("Rejected at ${failure.location}: ${failure.message}")
+            throw failure
+        } finally {
+            local?.close()
+            assertArrayEquals("Original PDF changed", hash, MessageDigest.getInstance("SHA-256").digest(source.readBytes()))
+        }
+    }
+
+    @Test
     fun existingPdf() {
         val path = InstrumentationRegistry.getArguments().getString("pdfPath")
         org.junit.Assume.assumeTrue("Supply -e pdfPath to benchmark an existing document", path != null)
@@ -491,7 +587,7 @@ class PdfReadingTest {
             assertEquals(1, reopened.getPageCount())
             val outputPageSize = reopened.getPageSize(0)
             assertEquals(originalPageWidth, outputPageSize.width)
-            assertTrue("translated page grows to fit below-band prose", outputPageSize.height > originalPageHeight)
+            assertEquals(originalPageHeight, outputPageSize.height)
             val renderedBitmap = Bitmap.createBitmap(880, (outputPageSize.height * 2f).toInt(), Bitmap.Config.ARGB_8888)
             rendered = renderedBitmap
             assertTrue(reopened.renderPage(0, renderedBitmap, RenderOptions()))
@@ -501,8 +597,10 @@ class PdfReadingTest {
             assertTrue(text, text.contains("Relleno."))
             assertTrue(text, text.contains("Texto izquierdo."))
             assertTrue(text, text.contains("Texto derecho."))
-            assertTrue(text, text.contains("Left paragraph first."))
-            assertTrue(text, text.contains("Right paragraph first."))
+            assertFalse(text, text.contains("Left paragraph first."))
+            assertFalse(text, text.contains("Right paragraph first."))
+            for (y in 508 until 620) for (x in 370 until 482)
+                assertEquals("Image moved at $x,$y", sourceRender.getPixel(x, y), renderedBitmap.getPixel(x, y))
             val originalArtwork = magentaPixelCount(sourceRender)
             val translatedArtwork = magentaPixelCount(renderedBitmap)
             assertTrue("source image lost or repeated ($originalArtwork -> $translatedArtwork)",
@@ -519,7 +617,7 @@ class PdfReadingTest {
         }
     }
     @Test
-    fun extremeTranslationPaginationRendersOnPlatformEngine() = runBlocking {
+    fun extremeTranslationRejectsOverflowWithoutPublishingOrChangingOriginal() = runBlocking {
         val context = instrumentation.targetContext
         PDFBoxResourceLoader.init(context)
         val root = File(context.cacheDir, "translation-pages-${System.nanoTime()}").apply { mkdirs() }
@@ -540,30 +638,19 @@ class PdfReadingTest {
                 document.save(source)
             }
             val translation = "long text ".repeat(12_000)
-            val translated = DocumentTranslationCoordinator(context).translateCopy(
+            val original = source.readBytes()
+            val failure = runCatching { DocumentTranslationCoordinator(context).translateCopy(
                 source = DocumentTranslationCoordinator(context).resolveSource(source.path),
                 outputDirectory = outputDirectory,
                 title = "Long flow pagination proof",
                 targetLanguage = "es",
                 translate = { _, _ -> Result.success(translation) },
                 onProgress = { _, _ -> }
-            )
-            val engine = AndroidPdfEngine(context)
-            try {
-                assertTrue(engine.open(translated.path))
-                assertTrue("oversized text flows to another page", engine.getPageCount() > 1)
-                val texts = (0 until engine.getPageCount()).map { index ->
-                    val size = engine.getPageSize(index)
-                    assertTrue(size.height <= 14_400f)
-                    val bitmap = Bitmap.createBitmap(88, (88f * size.height / size.width).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
-                    try { assertTrue("platform renders continuation page $index", engine.renderPage(index, bitmap, RenderOptions())) }
-                    finally { bitmap.recycle() }
-                    engine.getPageText(index)
-                }
-                val text = texts.joinToString(" ").replace(Regex("\\s+"), " ")
-                assertTrue(text.indexOf("Short prose.") in 0 until text.indexOf("long text"))
-                assertEquals(12_000, Regex("long text").findAll(text).count())
-            } finally { engine.close() }
+            ) }.exceptionOrNull()
+            assertTrue(failure is org.readera.openreadera.translation.TranslationRejectedException)
+            assertTrue(failure!!.message.orEmpty().contains("no cabe"))
+            assertTrue(outputDirectory.listFiles().orEmpty().isEmpty())
+            assertArrayEquals(original, source.readBytes())
         } finally { root.deleteRecursively() }
     }
 
@@ -642,7 +729,7 @@ class PdfReadingTest {
             translate = { text, language ->
                 assertEquals("es", language)
                 calls += text
-                Result.success("DEMO SIN GOOGLE: Traduccion completa debajo. ".repeat(8) + text)
+                Result.success("Texto traducido.")
             },
             onProgress = { _, _ -> }
         )
@@ -656,10 +743,10 @@ class PdfReadingTest {
             for (index in 0..3) {
                 val size = outputEngine.getPageSize(index)
                 assertEquals(sourceSizes[index].width, size.width)
-                assertTrue("page $index expands after long translation", size.height > sourceSizes[index].height)
+                assertEquals(sourceSizes[index].height, size.height)
                 val text = outputEngine.getPageText(index).filterNot(Char::isWhitespace)
-                assertTrue(text, text.contains("Croppingformprose."))
-                assertTrue(text, text.contains("DEMOSINGOOGLE:Traduccioncompletadebajo."))
+                assertFalse(text, text.contains("Croppingformprose."))
+                assertTrue(text, text.contains("Textotraducido."))
                 val bitmap = Bitmap.createBitmap((size.width * 2f).toInt(), (size.height * 2f).toInt(), Bitmap.Config.ARGB_8888)
                 try {
                     assertTrue(outputEngine.renderPage(index, bitmap, RenderOptions()))
