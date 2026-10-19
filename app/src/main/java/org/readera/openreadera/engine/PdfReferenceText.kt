@@ -6,13 +6,19 @@ import org.readera.openreadera.papers.PdfReferences
 /** Keep the two columns of a paper separate when the positional extractor interleaves its rows. */
 internal object PdfReferenceText {
     private fun columns(layout: PageTextLayout): List<List<PageTextWord>> {
-        val body = layout.words.filter { it.bounds.centerY() in .04f.. .96f }
-        // shortcut: require a clear central gutter; unusual layouts retain the extraction order.
+        // Ignore full-width title/author rows when detecting the body gutter.
+        val body = layout.words.filter { it.bounds.centerY() in .3f.. .96f }
+        // shortcut: infer two columns from a central gutter; unusual layouts keep extraction order.
         val twoColumns = body.count { it.bounds.right < .49f } > 20 &&
             body.count { it.bounds.left > .51f } > 20 &&
-            body.none { it.bounds.left < .51f && it.bounds.right > .49f }
-        return if (twoColumns) listOf(layout.words.filter { it.bounds.centerX() < .5f },
-            layout.words.filter { it.bounds.centerX() >= .5f }) else listOf(layout.words)
+            body.count { it.bounds.left < .51f && it.bounds.right > .49f } <= maxOf(2, body.size / 100)
+        if (!twoColumns) return listOf(layout.words)
+        val headerLines = layout.words.filter { it.bounds.centerY() < .3f &&
+            it.bounds.left < .51f && it.bounds.right > .49f }.map { it.lineIndex }.toSet()
+        val header = layout.words.filter { it.lineIndex in headerLines }
+        val columns = layout.words.filterNot { it.lineIndex in headerLines }
+        return listOf(header, columns.filter { it.bounds.centerX() < .5f },
+            columns.filter { it.bounds.centerX() >= .5f }).filter { it.isNotEmpty() }
     }
 
     fun bibliographyText(layout: PageTextLayout): String {

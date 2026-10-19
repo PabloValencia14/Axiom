@@ -29,6 +29,13 @@ class PaperReferencePdfTest {
             assertTrue("Brown 2020 must resolve", found.any { it.text.contains("few-shot", true) })
             assertTrue("Chung 2022 must resolve", found.any { it.text.contains("instruction-finetuned", true) })
             assertTrue("OpenAI 2023 must resolve", found.any { it.text.contains("GPT-4", true) })
+            val firstPage = engine.getPageTextLayout(0)
+            val actualGroup = firstPage.words.mapNotNull { PdfReferenceText.citationAt(firstPage, it) }
+                .firstOrNull { it.text.contains("Brown") && it.text.contains("Chung") && it.text.contains("OpenAI") }
+            assertNotNull("The actual first-page citation group must be detected at its word locations", actualGroup)
+            val actualMatches = PdfReferences.resolve(actualGroup!!, references)
+            assertTrue("The visible citation group must resolve all three works", actualMatches.any { it.text.contains("few-shot", true) } &&
+                actualMatches.any { it.text.contains("instruction-finetuned", true) } && actualMatches.any { it.text.contains("GPT-4", true) })
             assertTrue("Native text locations must be available", (0 until minOf(3, engine.getPageCount()))
                 .any { page -> val layout = engine.getPageTextLayout(page)
                     layout.words.any { PdfReferenceText.citationAt(layout, it) != null } })

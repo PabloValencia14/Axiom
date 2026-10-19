@@ -10,8 +10,8 @@ import org.readera.openreadera.papers.PdfReferences
 @RunWith(RobolectricTestRunner::class)
 class PdfReferenceTextTest {
     @Test fun twoColumnRowsDoNotMixOtherProseIntoWrappedCitations() {
-        val text = StringBuilder()
-        val words = mutableListOf<PageTextWord>()
+        val text = StringBuilder("Full-width title\n")
+        val words = mutableListOf(PageTextWord(0, 16, RectF(.35f, .1f, .65f, .12f), -1))
         val left = listOf("Previous work (Brown et al.,", "2020; Chung et al., 2022)") + List(8) { "Left column ordinary body text" }
         val right = List(10) { "Other column unrelated body text" }
         for (line in left.indices) {
@@ -21,7 +21,7 @@ class PdfReferenceTextTest {
                     text.append(word).append(' ')
                     val x = .08f + .45f * column + .05f * index
                     words += PageTextWord(start, start + word.length,
-                        RectF(x, .1f + line * .012f, x + .04f, .11f + line * .012f), line)
+                        RectF(x, .35f + line * .012f, x + .04f, .36f + line * .012f), line)
                 }
             }
             text.append('\n')
