@@ -21,7 +21,8 @@ data class PageTextWord(
 data class PageTextLayout(
     val text: String,
     val words: List<PageTextWord>,
-    val source: PageTextSource = PageTextSource.NATIVE
+    val source: PageTextSource = PageTextSource.NATIVE,
+    val referenceWords: Map<Int, org.readera.openreadera.papers.PaperReference> = emptyMap()
 )
 
 data class PageTextRange(

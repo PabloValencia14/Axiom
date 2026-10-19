@@ -2,6 +2,12 @@
 
 Axiom es una aplicación Android de código abierto para leer y anotar documentos. Incluye biblioteca y progreso locales; lector de EPUB, TXT/Markdown, FB2, DOCX y PDF; cómics CBZ; conversión local de MOBI/AZW/AZW3 sin DRM a EPUB; búsqueda, marcadores, notas y escritura con stylus. En PDF incluye edición no destructiva de páginas, OCR/copia buscable y exportación de páginas a imagen o texto. Las firmas visuales de PDF son anotaciones, no firmas criptográficas.
 
+## Referencias de la bibliografía final (1.3.1)
+
+También se puede pulsar o mantener el lápiz sobre los autores y el título de una entrada de la bibliografía final para mostrar **Abrir paper completo**. Se utiliza la entrada completa del índice local, incluidas sus continuaciones en otra página, con el mismo buscador y descargador que las citas del texto. Las zonas pulsables respetan las columnas; el modo de escritura continúa reservando el lápiz para anotar.
+
+Verificación: 189 pruebas JVM superadas; en Xiaomi Pad 7 pasan la pulsación y hover de la bibliografía, las citas en página simple y doble ampliada y la conservación de libros/anotaciones. Las zonas de Brown, Chung y OpenAI se contrastan con el texto nativo del paper original.
+
 ## Abrir el artículo completo desde una cita (1.3.0)
 
 La ventana de referencias incluye **Abrir paper completo**. Al pulsarlo, Axiom localiza el PDF, lo descarga, lo añade a la biblioteca con su título y autores y lo abre en el lector. La flecha de salida permite volver al documento original; al abrir de nuevo la misma referencia se reutiliza el PDF validado que ya se descargó.

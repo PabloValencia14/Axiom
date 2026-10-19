@@ -29,6 +29,13 @@ class PaperReferencePdfTest {
             assertTrue("Brown 2020 must resolve", found.any { it.text.contains("few-shot", true) })
             assertTrue("Chung 2022 must resolve", found.any { it.text.contains("instruction-finetuned", true) })
             assertTrue("OpenAI 2023 must resolve", found.any { it.text.contains("GPT-4", true) })
+            for (reference in found) {
+                val layout = PdfReferenceText.withReferences(engine.getPageTextLayout(reference.page), reference.page, references)
+                val linkedWords = layout.words.filter { layout.referenceWords[it.startUtf16] == reference }
+                assertTrue("Full bibliography entry must be clickable (${linkedWords.size} words, ${reference.ranges}): ${reference.text}", linkedWords.size >= 4)
+                assertEquals(reference, PdfReferenceText.citationAt(layout, linkedWords.first())!!.reference)
+                assertEquals(reference, PdfReferenceText.citationAt(layout, linkedWords[linkedWords.size / 2])!!.reference)
+            }
             val wrapped = engine.getPageTextLayout(1).let { layout ->
                 layout.words.firstNotNullOf { word -> PdfReferenceText.citationAt(layout, word)?.takeIf {
                     it.text.contains("Kilby") && it.text.contains("2010")
