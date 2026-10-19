@@ -35,7 +35,7 @@ class BookRepository(
 
     suspend fun insertBook(book: Book): Long = bookDao.insert(book)
     suspend fun insertAll(books: List<Book>) = bookDao.insertAll(books)
-    suspend fun updateBook(book: Book) = bookDao.update(book)
+    suspend fun updateBook(book: Book) = bookDao.update(book.copy(metadataUpdatedAt = maxOf(System.currentTimeMillis(), book.metadataUpdatedAt + 1)))
     suspend fun updateCoverAndMetadata(book: Book) = bookDao.updateCoverAndMetadata(
         id = book.id,
         fileTitle = File(book.filePath).nameWithoutExtension.replace('_', ' ').trim(),

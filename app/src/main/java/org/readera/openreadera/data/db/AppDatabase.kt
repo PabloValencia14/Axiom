@@ -27,7 +27,7 @@ import org.readera.openreadera.data.model.SearchQuery
         BookCollectionCrossRef::class,
         SearchQuery::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -44,6 +44,18 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE books ADD COLUMN syncId TEXT NOT NULL DEFAULT ''")
                 db.execSQL("UPDATE books SET syncId = lower(hex(randomblob(16))) WHERE syncId = ''")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_books_syncId ON books(syncId)")
+            }
+        }
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (table in listOf("quotes", "bookmarks")) {
+                    db.execSQL("ALTER TABLE $table ADD COLUMN syncId TEXT NOT NULL DEFAULT ''")
+                    db.execSQL("ALTER TABLE $table ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
+                    db.execSQL("ALTER TABLE $table ADD COLUMN deletedAt INTEGER NOT NULL DEFAULT 0")
+                }
+                db.execSQL("ALTER TABLE books ADD COLUMN metadataUpdatedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE books SET isToRead = CASE WHEN status = 'TO_READ' THEN 1 WHEN isHaveRead = 1 OR status = 'HAVE_READ' THEN 0 ELSE isToRead END, isHaveRead = CASE WHEN status = 'TO_READ' THEN 0 WHEN status = 'HAVE_READ' THEN 1 ELSE isHaveRead END")
+                db.execSQL("UPDATE books SET status = CASE WHEN isHaveRead = 1 THEN 'HAVE_READ' WHEN isToRead = 1 THEN 'TO_READ' ELSE status END")
             }
         }
         @Volatile
@@ -72,7 +84,7 @@ abstract class AppDatabase : RoomDatabase() {
                             }
                         }
                     })
-                    .addMigrations(MIGRATION_4_5)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { instance = it }
             }

@@ -8,6 +8,7 @@ import android.util.Log
 import android.util.LruCache
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -102,6 +103,31 @@ class ReaderViewModel(
 
     val appThemeMode: StateFlow<AppThemeMode> = preferences.appThemeMode
 
+    private var references: List<org.readera.openreadera.papers.PaperReference>? = null
+    private val referencesMutex = Mutex()
+
+    suspend fun findReferences(target: org.readera.openreadera.papers.CitationTarget): List<org.readera.openreadera.papers.PaperReference> =
+        withContext(Dispatchers.IO) {
+            referencesMutex.withLock {
+                if (references == null) {
+                    val currentEngine = engine ?: return@withLock emptyList()
+                    val count = synchronized(currentEngine) { currentEngine.getPageCount() }
+                    val pages = mutableListOf<Pair<Int, String>>()
+                    var bytes = 0
+                    // shortcut: index the final 80 pages / 1M characters; expand only when long-book references need it.
+                    for (page in maxOf(0, count - 80) until count) {
+                        currentCoroutineContext().ensureActive()
+                        val text = synchronized(currentEngine) { PdfReferenceText.bibliographyText(currentEngine.getPageTextLayout(page)) }
+                        bytes += text.length
+                        if (bytes > 1_000_000) break
+                        pages += page to text
+                    }
+                    references = org.readera.openreadera.papers.PdfReferences.parse(pages)
+                }
+                org.readera.openreadera.papers.PdfReferences.resolve(target, references.orEmpty())
+            }
+        }
+
     private var engine: DocumentEngine? = null
     private var activeRenderJob: Job? = null
     private var prefetchJob: Job? = null
@@ -130,6 +156,7 @@ class ReaderViewModel(
     private val ocrDelegate = lazy { PageOcrRecognizer() }
 
     private fun invalidatePageText() {
+        references = null
         pageTextJobs.values.forEach(Job::cancel)
         pageTextJobs.clear()
         pageTextCache.evictAll()
@@ -230,7 +257,11 @@ class ReaderViewModel(
         renderCache.clear()
     }
     private val statsManager by lazy { ReadingStatsManager(context) }
-    private var lastPageTurnTimeMs = System.currentTimeMillis()
+    private val readingSession = org.readera.openreadera.data.stats.ReadingSession(
+        android.os.SystemClock::elapsedRealtime,
+        { elapsed, pages -> statsManager.recordReadingTime(elapsed, pages) }
+    )
+    private var readingClockJob: Job? = null
 
     private val naturalTtsPlayerDelegate: Lazy<NaturalTtsPlayer> = lazy {
         NaturalTtsPlayer(
@@ -256,12 +287,16 @@ class ReaderViewModel(
     }
     private val naturalTtsPlayer: NaturalTtsPlayer by naturalTtsPlayerDelegate
 
-    private fun trackPageReadingTime() {
-        val now = System.currentTimeMillis()
-        val elapsed = now - lastPageTurnTimeMs
-        lastPageTurnTimeMs = now
-        if (elapsed in 3_000..300_000) {
-            statsManager.recordReadingTime(elapsed, pagesTurned = 1)
+    fun setReadingActive(active: Boolean) {
+        if (active) {
+            readingSession.resume()
+            if (readingClockJob?.isActive != true) readingClockJob = viewModelScope.launch {
+                while (true) { delay(30_000); readingSession.flush() }
+            }
+        } else {
+            readingClockJob?.cancel()
+            readingClockJob = null
+            readingSession.pause()
         }
     }
 
@@ -768,7 +803,7 @@ class ReaderViewModel(
             navigationDirection = if (validPage > currentState.currentPage) 1 else -1
         }
 
-        trackPageReadingTime()
+        readingSession.flush(pages = 1)
         val remainingMin = calculateEstimatedTimeRemaining(validPage, total)
 
         // Set or keep reading anchor point ("Punto de lectura original") for visual checkpoint
@@ -1414,6 +1449,7 @@ class ReaderViewModel(
     }
 
     override fun onCleared() {
+        setReadingActive(false)
         ttsSleepTimer.cancel()
         saveProgressNow()
         super.onCleared()

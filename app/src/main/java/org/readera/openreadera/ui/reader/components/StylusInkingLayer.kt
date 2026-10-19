@@ -34,7 +34,8 @@ fun StylusInkingLayer(
     inputScale: Float = 1f,
     onPageActive: (Int) -> Unit = {},
     removedStrokes: List<DrawingStroke> = emptyList(),
-    onRemovedStrokesApplied: (List<DrawingStroke>) -> Unit = {}
+    onRemovedStrokesApplied: (List<DrawingStroke>) -> Unit = {},
+    onCitation: ((org.readera.openreadera.papers.CitationTarget) -> Unit)? = null
 ) {
     key(page, pageAspectRatio, pageTextRange) {
         AndroidView(
@@ -42,6 +43,7 @@ fun StylusInkingLayer(
             factory = { ReaderInkView(it) },
             onRelease = { it.release() },
             update = { view ->
+                view.onCitation = onCitation
                 view.configure(
                     page, savedStrokes, currentTool, currentColorHex, currentStrokeWidth,
                     onStrokeFinished, onDeleteStroke, pageAspectRatio, pageTextRange, pageTextLayout,

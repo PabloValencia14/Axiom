@@ -220,12 +220,16 @@ fun ReaderScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.setReadingActive(true)
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                viewModel.setReadingActive(false)
                 viewModel.saveProgressNow()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        viewModel.setReadingActive(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
         onDispose {
+            viewModel.setReadingActive(false)
             viewModel.saveProgressNow()
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
@@ -447,6 +451,13 @@ fun ReaderScreen(
                 setOf(state.currentPage, state.currentPage + 1) else setOf(state.currentPage))
         else viewModel.requestPageText(emptySet())
     }
+    var citationTarget by remember(state.book?.id) { mutableStateOf<org.readera.openreadera.papers.CitationTarget?>(null) }
+    if (citationTarget != null) ReferencePreviewDialog(
+        target = citationTarget!!,
+        load = viewModel::findReferences,
+        onPage = { page -> citationTarget = null; viewModel.goToPage(page) },
+        onDismiss = { citationTarget = null }
+    )
     val currentPageText = state.pageText[state.currentPage]
     LaunchedEffect(state.error) {
         state.error?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
@@ -676,6 +687,7 @@ fun ReaderScreen(
                                         onStrokeFinished = { viewModel.onStrokeFinished(it) },
                                         onDeleteStroke = { viewModel.deleteStroke(it) },
                                         onPageActive = viewModel::setActiveInkPage,
+                                        onCitation = if (state.book?.format?.equals("PDF", true) == true && !isPresenting) ({ citationTarget = it }) else null,
                                         removedStrokes = viewModel.strokesForRemovedPage(state.currentPage),
                                         onRemovedStrokesApplied = viewModel::acknowledgeRemovedInkStrokes,
                                     )
@@ -715,6 +727,7 @@ fun ReaderScreen(
                                         onStrokeFinished = { viewModel.onStrokeFinished(it) },
                                         onDeleteStroke = { viewModel.deleteStroke(it) },
                                         onPageActive = viewModel::setActiveInkPage,
+                                        onCitation = if (state.book?.format?.equals("PDF", true) == true && !isPresenting) ({ citationTarget = it }) else null,
                                         removedStrokes = viewModel.strokesForRemovedPage(state.currentPage),
                                         onRemovedStrokesApplied = viewModel::acknowledgeRemovedInkStrokes,
                                     )
@@ -758,6 +771,7 @@ fun ReaderScreen(
                                             onStrokeFinished = { viewModel.onStrokeFinished(it) },
                                             onDeleteStroke = { viewModel.deleteStroke(it) },
                                             onPageActive = viewModel::setActiveInkPage,
+                                        onCitation = if (state.book?.format?.equals("PDF", true) == true && !isPresenting) ({ citationTarget = it }) else null,
                                             removedStrokes = viewModel.strokesForRemovedPage(state.currentPage + 1),
                                             onRemovedStrokesApplied = viewModel::acknowledgeRemovedInkStrokes,
                                         )
@@ -791,6 +805,7 @@ fun ReaderScreen(
                                     onStrokeFinished = { viewModel.onStrokeFinished(it) },
                                     onDeleteStroke = { viewModel.deleteStroke(it) },
                                     onPageActive = viewModel::setActiveInkPage,
+                                        onCitation = if (state.book?.format?.equals("PDF", true) == true && !isPresenting) ({ citationTarget = it }) else null,
                                     removedStrokes = viewModel.strokesForRemovedPage(state.currentPage),
                                     onRemovedStrokesApplied = viewModel::acknowledgeRemovedInkStrokes,
                                 )
