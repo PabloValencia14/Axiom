@@ -1,5 +1,12 @@
 package org.readera.openreadera.papers
 
+internal fun paperFileName(id: String, title: String, authors: List<String>): String {
+    fun safe(text: String, length: Int) = text.replace(Regex("[^\\p{L}\\p{N}\\s-]"), "").take(length).trim()
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(id.removePrefix("arxiv:").toByteArray(Charsets.UTF_8)).take(8).joinToString("") { "%02x".format(it) }
+    return "${safe(authors.firstOrNull() ?: "Paper", 25)} - ${safe(title, 45)}-$digest.pdf"
+}
+
 data class AcademicPaper(
     val id: String,
     val title: String,

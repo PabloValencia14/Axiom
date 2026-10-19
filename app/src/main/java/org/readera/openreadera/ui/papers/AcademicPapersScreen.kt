@@ -228,7 +228,7 @@ fun AcademicPapersScreen(
                             downloadState = downloadState,
                             onDownloadClick = { viewModel.downloadPaper(paper) },
                             onOpenClick = {
-                                val file = resolveDownloadedPaperFile(paper.title, paper.authors, downloadState?.savedFilePath)
+                                val file = resolveDownloadedPaperFile(paper.title, paper.authors, downloadState?.savedFilePath, paper.id)
                                 file?.let { onOpenPaper(it.absolutePath) }
                             }
                         )
@@ -250,7 +250,7 @@ fun AcademicPaperCard(
     val isLocalFileExisting = remember(paper.id, downloadState) {
         if (downloadState?.isCompleted == true) true
         else {
-            resolveDownloadedPaperFile(paper.title, paper.authors, downloadState?.savedFilePath) != null
+            resolveDownloadedPaperFile(paper.title, paper.authors, downloadState?.savedFilePath, paper.id) != null
         }
     }
     val isCompleted = downloadState?.isCompleted == true || isLocalFileExisting
@@ -415,7 +415,8 @@ fun AcademicPaperCard(
 internal fun resolveDownloadedPaperFile(
     title: String,
     authors: List<String>,
-    savedFilePath: String? = null
+    savedFilePath: String? = null,
+    paperId: String? = null
 ): File? {
     if (!savedFilePath.isNullOrBlank()) {
         val f = File(savedFilePath)
@@ -433,6 +434,10 @@ internal fun resolveDownloadedPaperFile(
         val safeAuthor = authors.firstOrNull()?.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\\s-]"), "")?.take(25)?.trim() ?: "arXiv"
 
         for (dir in dirs) {
+            paperId?.let { id ->
+                val saved = File(dir, org.readera.openreadera.papers.paperFileName(id, title, authors))
+                if (saved.isFile && saved.length() > 0) return saved
+            }
             val f1 = File(dir, "$safeAuthor - $safeTitle.pdf")
             if (f1.exists() && f1.length() > 0) return f1
 

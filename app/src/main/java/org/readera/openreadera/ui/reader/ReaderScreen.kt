@@ -455,6 +455,10 @@ fun ReaderScreen(
     if (citationTarget != null) ReferencePreviewDialog(
         target = citationTarget!!,
         load = viewModel::findReferences,
+        onOpenPaper = { reference, progress ->
+            registerAndOpen(viewModel.downloadReference(reference, progress))
+            citationTarget = null
+        },
         onPage = { page -> citationTarget = null; viewModel.goToPage(page) },
         onDismiss = { citationTarget = null }
     )

@@ -1,9 +1,16 @@
 package org.readera.openreadera.papers
 
 import android.content.Context
-import android.os.Environment
 import android.util.Log
 import android.system.Os
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.readera.openreadera.catalog.CatalogRequestExecutor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -15,17 +22,22 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
-class AcademicPapersClient(private val context: Context) {
+class AcademicPapersClient internal constructor(
+    private val context: Context,
+    network: OkHttpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS).build(),
+    private val directory: () -> File = StorageScanner::getAppBooksDirectory
+) {
 
     companion object {
         private const val TAG = "AcademicPapersClient"
+        private const val MAX_PDF_BYTES = 100L * 1024 * 1024
+        private val downloads = Mutex()
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private val requests = CatalogRequestExecutor(network)
+
+    suspend fun resolveReference(reference: PaperReference): AcademicPaper = ReferencedPaperResolver(requests).resolve(reference)
 
     suspend fun searchPapers(
         query: String,
@@ -53,8 +65,8 @@ class AcademicPapersClient(private val context: Context) {
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Axiom Academic)")
                 .build()
 
-            val resp = client.newCall(req).execute()
-            val xml = resp.body?.string() ?: ""
+            val resp = requests.execute(req)
+            val xml = resp.use { it.body?.string() ?: "" }
 
             if (resp.isSuccessful && xml.isNotBlank()) {
                 val entryPattern = Pattern.compile("<entry>(.*?)</entry>", Pattern.DOTALL)
@@ -132,64 +144,77 @@ class AcademicPapersClient(private val context: Context) {
         results
     }
 
-    suspend fun downloadPaper(
-        paper: AcademicPaper,
-        onProgress: (Float) -> Unit
-    ): Result<File> = withContext(Dispatchers.IO) {
-        try {
-            val downloadDir = StorageScanner.getAppBooksDirectory()
-
-            val safeTitle = paper.title.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\\s-]"), "").take(45).trim()
-            val safeAuthor = paper.authors.firstOrNull()?.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\\s-]"), "")?.take(25)?.trim() ?: "arXiv"
-            val targetFile = File(downloadDir, "$safeAuthor - $safeTitle.pdf")
-
-            val req = Request.Builder()
-                .url(paper.pdfUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Xiaomi Pad 7)")
-                .build()
-
-            val tempFile = File.createTempFile("paper-", ".pdf", downloadDir)
+    suspend fun downloadPaper(paper: AcademicPaper, onProgress: (Float) -> Unit): Result<File> = withContext(Dispatchers.IO) {
+        downloads.withLock {
+            var temporary: File? = null
             try {
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful || resp.body == null) {
-                        return@withContext Result.failure(Exception("Error al descargar el paper (HTTP ${resp.code})"))
-                    }
-                    val body = resp.body!!
+                val downloadDir = directory()
+                check(downloadDir.isDirectory || downloadDir.mkdirs()) { "No se pudo crear la carpeta de papers." }
+                val targetFile = File(downloadDir, paperFileName(paper.id, paper.title, paper.authors))
+                if (targetFile.exists()) {
+                    validatePdf(targetFile)
+                    indexPaper(targetFile, paper)
+                    onProgress(1f)
+                    return@withLock Result.success(targetFile)
+                }
+                val req = Request.Builder().url(paper.pdfUrl).header("User-Agent", "Axiom/Android (paper download)").build()
+                val tempFile = File.createTempFile(".paper-", ".part", downloadDir)
+                temporary = tempFile
+                requests.execute(req).use { response ->
+                    check(response.isSuccessful) { "No se pudo descargar el PDF (HTTP ${response.code})." }
+                    val body = response.body ?: error("La descarga está vacía.")
                     val length = body.contentLength()
+                    require(length <= MAX_PDF_BYTES) { "El PDF supera el límite de 100 MB." }
                     val buffer = ByteArray(8192)
                     var totalBytes = 0L
                     FileOutputStream(tempFile).use { output ->
                         body.byteStream().use { input ->
-                            var bytesRead: Int
-                            while (input.read(buffer).also { bytesRead = it } != -1) {
-                                output.write(buffer, 0, bytesRead)
-                                totalBytes += bytesRead
-                                if (length > 0) onProgress((totalBytes.toFloat() / length.toFloat()).coerceIn(0f, 1f))
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val count = input.read(buffer)
+                                if (count == -1) break
+                                totalBytes += count
+                                require(totalBytes <= MAX_PDF_BYTES) { "El PDF supera el límite de 100 MB." }
+                                output.write(buffer, 0, count)
+                                if (length > 0) onProgress((totalBytes.toFloat() / length).coerceIn(0f, .99f))
                             }
                         }
                     }
+                    check(length < 0 || totalBytes == length) { "La descarga del PDF está incompleta." }
                 }
+                validatePdf(tempFile)
+                currentCoroutineContext().ensureActive()
                 Os.rename(tempFile.absolutePath, targetFile.absolutePath)
-            } finally {
-                if (tempFile.exists()) tempFile.delete()
-            }
-            onProgress(1f)
-
-            // Index in Room database so it opens immediately in reader
-            StorageScanner.scanSingleFile(context, targetFile)
-
-            try {
-                val syncManager = org.readera.openreadera.sync.GoogleDriveSyncManager(context)
-                if (syncManager.isDriveConnected() && syncManager.isAutoSyncEnabled) {
-                    syncManager.triggerImmediateBackgroundSync()
-                }
-            } catch (_: Exception) {}
-
-            Result.success(targetFile)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error downloading paper ${paper.title}", e)
-            Result.failure(e)
+                indexPaper(targetFile, paper)
+                onProgress(1f)
+                try {
+                    val syncManager = org.readera.openreadera.sync.GoogleDriveSyncManager(context)
+                    if (syncManager.isDriveConnected() && syncManager.isAutoSyncEnabled)
+                        syncManager.triggerImmediateBackgroundSync()
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { }
+                Result.success(targetFile)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { Result.failure(java.io.IOException("No se pudo descargar o validar el PDF. Puede estar restringido o no disponible.")) }
+            finally { temporary?.delete() }
         }
+    }
+
+    private fun validatePdf(file: File) {
+        require(file.length() in 5..MAX_PDF_BYTES) { "El archivo descargado no es un PDF válido." }
+        val header = file.inputStream().use { input -> ByteArray(5).also { check(input.read(it) == 5) } }
+        require(header.contentEquals("%PDF-".toByteArray(Charsets.US_ASCII))) { "La dirección no ha devuelto un PDF." }
+        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            PdfRenderer(descriptor).use { renderer -> check(renderer.pageCount > 0) }
+        }
+    }
+
+    private suspend fun indexPaper(file: File, paper: AcademicPaper) {
+        val app = context.applicationContext as? org.readera.openreadera.OpenReadEraApplication ?: return
+        if (app.repository.getBookByPath(file.absolutePath) != null) return
+        val book = StorageScanner.scanSingleFile(context, file) ?: return
+        app.repository.updateBook(book.copy(title = paper.title, author = paper.authors.take(3).joinToString(", ") +
+            if (paper.authors.size > 3) " et al." else ""))
     }
 
     private fun getFallbackPapers(query: String = ""): List<AcademicPaper> {

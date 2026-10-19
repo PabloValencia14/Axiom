@@ -106,6 +106,11 @@ class ReaderViewModel(
     private var references: List<org.readera.openreadera.papers.PaperReference>? = null
     private val referencesMutex = Mutex()
 
+    suspend fun downloadReference(reference: org.readera.openreadera.papers.PaperReference, progress: (Float) -> Unit): File {
+        val client = org.readera.openreadera.papers.AcademicPapersClient(context)
+        return client.downloadPaper(client.resolveReference(reference), progress).getOrThrow()
+    }
+
     suspend fun findReferences(target: org.readera.openreadera.papers.CitationTarget): List<org.readera.openreadera.papers.PaperReference> =
         withContext(Dispatchers.IO) {
             referencesMutex.withLock {
