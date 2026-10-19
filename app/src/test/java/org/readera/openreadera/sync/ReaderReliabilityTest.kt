@@ -18,6 +18,30 @@ import org.readera.openreadera.data.model.*
 class ReaderReliabilityTest {
     private val context: Context = RuntimeEnvironment.getApplication()
 
+    @Test fun legacySnapshotsCannotReintroduceContradictoryReadingFlags() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
+        try {
+            val manager = GoogleDriveSyncManager(context, db)
+            for (status in listOf(BookStatus.TO_READ, BookStatus.HAVE_READ)) {
+                val book = Book(title = "Legacy $status", filePath = "/$status.pdf", format = "PDF")
+                val id = db.bookDao().insert(book)
+                val remote = JSONObject().put("version", 3).put("books", JSONArray().put(JSONObject()
+                    .put("id", 42L).put("syncId", book.syncId).put("title", book.title)
+                    .put("status", status.name).put("isToRead", false).put("isHaveRead", false)))
+                manager.mergeRemoteState(remote.toString())
+                val restored = db.bookDao().getBookByIdSync(id)!!
+                if (status == BookStatus.TO_READ) {
+                    assertTrue(restored.isToRead)
+                    db.bookDao().toggleToRead(id)
+                } else {
+                    assertTrue(restored.isHaveRead)
+                    db.bookDao().toggleHaveRead(id)
+                }
+                assertEquals(BookStatus.UNREAD, db.bookDao().getBookByIdSync(id)!!.status)
+            }
+        } finally { db.close() }
+    }
+
     @Test fun togglesLeaveListsAndCompletedBooksSurviveReopening() = runBlocking {
         val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).build()
         try {

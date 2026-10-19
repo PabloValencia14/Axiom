@@ -7,7 +7,7 @@
 - Separate metadata modification time from reading progress, fix pending/read toggle transitions, and normalize legacy contradictory states through non-destructive Room migration 5→6.
 - Record reading intervals using a monotonic clock, flush on pause/exit and during long pages, exclude background time, expire inactive streaks, and derive completed books from the library state.
 - Coalesce immediate Drive requests for 20 seconds, keep active work instead of replacing it, and process changes received during a sync. Existing attachment integrity checks remain enabled; battery improvement has not been benchmarked.
-- Verification: 179 JVM tests in 38 classes passed; debug, AndroidTest and release APKs built. Six Xiaomi Pad 7 debug instrumentation cases passed, including system-injected stylus tap/hover in the real reader, reference-page navigation, real-paper bibliography resolution, sync merge, existing-library migration and native/OCR/inking regression. The exact non-debuggable release APK passed real-paper lookup and existing-data preservation checks.
+- Verification: 180 JVM tests in 38 classes passed; debug, AndroidTest and release APKs built. Six Xiaomi Pad 7 debug instrumentation cases passed, including system-injected stylus tap/hover in the real reader, reference-page navigation, real-paper bibliography resolution, sync merge, existing-library migration and native/OCR/inking regression. The exact non-debuggable release APK passed real-paper lookup and existing-data preservation checks.
 - PDF translation compatibility and automatic language-quality limits from 1.1.0 remain; this release does not claim universal paper translation or integrate Unlimited-OCR.
 
 ## 1.1.0 — 2026-10-16

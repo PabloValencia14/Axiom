@@ -710,7 +710,7 @@ class GoogleDriveSyncManager(
         val format = remote.optString("format", "Documento").ifBlank { "Documento" }
         val filePath = remote.optString("filePath").takeIf { it.isNotBlank() && File(it).isFile }
             ?: error("El archivo del libro sincronizado no está disponible")
-        return Book(
+        return normalizeReadingState(Book(
             syncId = DriveSyncSnapshotCodec.bookSyncId(remote),
             title = remote.optString("title", "Documento sincronizado"),
             author = remote.optString("author", "Autor desconocido"),
@@ -744,7 +744,7 @@ class GoogleDriveSyncManager(
             reviewTags = remoteText(remote, "reviewTags", null),
             fileCount = remote.optInt("fileCount", 1).coerceAtLeast(1),
             metadataUpdatedAt = remote.optLong("metadataUpdatedAt", 0L)
-        )
+        ))
     }
 
     private fun mergeBook(local: Book, remote: JSONObject): Book {
@@ -764,7 +764,7 @@ class GoogleDriveSyncManager(
                 (remoteLastOpened > local.lastOpened || local.lastOpened == 0L))
         if (!remoteWins) return progress
 
-        return progress.copy(
+        return normalizeReadingState(progress.copy(
             metadataUpdatedAt = remoteUpdated,
             title = remote.optString("title", local.title),
             author = remote.optString("author", local.author),
@@ -792,7 +792,17 @@ class GoogleDriveSyncManager(
                 else if (remote.isNull("reviewDate")) null else remote.optLong("reviewDate"),
             reviewTags = remoteText(remote, "reviewTags", local.reviewTags),
             fileCount = remote.optInt("fileCount", local.fileCount).coerceAtLeast(1)
-        )
+        ))
+    }
+
+    private fun normalizeReadingState(book: Book): Book {
+        val status = when {
+            book.status == BookStatus.TO_READ -> BookStatus.TO_READ
+            book.status == BookStatus.HAVE_READ || book.isHaveRead -> BookStatus.HAVE_READ
+            book.isToRead -> BookStatus.TO_READ
+            else -> book.status
+        }
+        return book.copy(status = status, isToRead = status == BookStatus.TO_READ, isHaveRead = status == BookStatus.HAVE_READ)
     }
 
     private fun remoteText(remote: JSONObject, name: String, current: String?): String? =
