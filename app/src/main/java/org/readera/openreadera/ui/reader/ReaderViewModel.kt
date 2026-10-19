@@ -111,7 +111,7 @@ class ReaderViewModel(
         return client.downloadPaper(client.resolveReference(reference), progress).getOrThrow()
     }
 
-    suspend fun findReferences(target: org.readera.openreadera.papers.CitationTarget): List<org.readera.openreadera.papers.PaperReference> =
+    private suspend fun bibliography(): List<org.readera.openreadera.papers.PaperReference> =
         withContext(Dispatchers.IO) {
             referencesMutex.withLock {
                 if (references == null) {
@@ -129,9 +129,12 @@ class ReaderViewModel(
                     }
                     references = org.readera.openreadera.papers.PdfReferences.parse(pages)
                 }
-                org.readera.openreadera.papers.PdfReferences.resolve(target, references.orEmpty())
+                references.orEmpty()
             }
         }
+
+    suspend fun findReferences(target: org.readera.openreadera.papers.CitationTarget): List<org.readera.openreadera.papers.PaperReference> =
+        target.reference?.let { listOf(it) } ?: org.readera.openreadera.papers.PdfReferences.resolve(target, bibliography())
 
     private var engine: DocumentEngine? = null
     private var activeRenderJob: Job? = null
@@ -209,7 +212,11 @@ class ReaderViewModel(
                         if (recognized.text.isBlank() && extracted.text.isNotBlank()) extracted else recognized
                     }
                     currentCoroutineContext().ensureActive()
-                    val resolved = ReaderPageTextState(layout, when {
+                    val linkedLayout = if (_uiState.value.book?.format?.equals("PDF", true) == true &&
+                        layout.source == PageTextSource.NATIVE) withContext(Dispatchers.IO) {
+                        PdfReferenceText.withReferences(layout, page, bibliography())
+                    } else layout
+                    val resolved = ReaderPageTextState(linkedLayout, when {
                         layout.text.isBlank() -> "No se detectó texto en esta página"
                         layout.words.isEmpty() -> "Texto disponible; no se pudo localizar para resaltar"
                         layout.source == PageTextSource.OCR -> "Texto reconocido · OCR local"

@@ -30,7 +30,27 @@ internal object PdfReferenceText {
         }
     }
 
+    fun withReferences(layout: PageTextLayout, page: Int,
+        references: List<org.readera.openreadera.papers.PaperReference>): PageTextLayout {
+        val ranges = references.flatMap { reference -> reference.ranges.filter { it.page == page }.map { it to reference } }
+        if (ranges.isEmpty() || layout.words.isEmpty()) return layout
+        val links = mutableMapOf<Int, org.readera.openreadera.papers.PaperReference>()
+        var offset = 0
+        for (column in columns(layout)) {
+            for (line in column.groupBy { it.lineIndex }.values) {
+                for (word in line) {
+                    ranges.firstOrNull { offset in it.first.start until it.first.end }?.let { links[word.startUtf16] = it.second }
+                    offset += word.endUtf16 - word.startUtf16 + 1
+                }
+            }
+        }
+        return layout.copy(referenceWords = links)
+    }
+
     fun citationAt(layout: PageTextLayout, word: PageTextWord): CitationTarget? {
+        layout.referenceWords[word.startUtf16]?.let { reference ->
+            return CitationTarget(reference.text, word.startUtf16, word.endUtf16, reference)
+        }
         val column = columns(layout).firstOrNull { word in it } ?: return null
         val nearby = column.filter { kotlin.math.abs(it.bounds.centerY() - word.bounds.centerY()) < .065f }
         val text = StringBuilder()

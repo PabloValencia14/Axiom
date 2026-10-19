@@ -40,7 +40,10 @@ class ReferenceInteractionTest {
 
     @Test fun doublePageZoomKeepsRightPageReferencesAligned() = checkReader(doublePage = true, zoom = true, rightPage = true)
 
-    private fun checkReader(doublePage: Boolean = false, zoom: Boolean = false, rightPage: Boolean = false) = kotlinx.coroutines.runBlocking {
+    @Test fun bibliographyAuthorTapAndHoverOpenTheFullPaperAction() = checkReader(bibliography = true)
+
+    private fun checkReader(doublePage: Boolean = false, zoom: Boolean = false, rightPage: Boolean = false,
+        bibliography: Boolean = false) = kotlinx.coroutines.runBlocking {
         val targetContext = instrumentation.targetContext
         val names = java.util.Collections.synchronizedSet(mutableSetOf<String>())
         val prefix = "references-qa-${java.util.UUID.randomUUID()}-"
@@ -96,7 +99,11 @@ class ReferenceInteractionTest {
                     org.readera.openreadera.ui.reader.ReaderScreen(model, onBack = {}, onOpenDocumentDetails = {})
                 } }
             }
-            val citationPage = if (rightPage) 1 else 0
+            val citationPage = if (bibliography) 2 else if (rightPage) 1 else 0
+            if (bibliography) {
+                await { model.uiState.value.totalPages == 3 }
+                instrumentation.runOnMainSync { model.goToPage(citationPage) }
+            }
             await { model.uiState.value.pageText[citationPage]?.layout?.words?.isNotEmpty() == true }
             await {
                 var ready = false
@@ -130,10 +137,13 @@ class ReferenceInteractionTest {
                 instrumentation.uiAutomation.waitForIdle(150, 5_000)
             }
             val layout = model.uiState.value.pageText.getValue(citationPage).layout!!
-            val word = layout.words.first { PdfReferenceText.citationAt(layout, it)?.text?.contains("OpenAI") == true }
+            val word = layout.words.first {
+                if (bibliography) layout.text.substring(it.startUtf16, it.endUtf16) == "OpenAI."
+                else PdfReferenceText.citationAt(layout, it)?.text?.contains("OpenAI") == true
+            }
             var screenX = 0f; var screenY = 0f
             instrumentation.runOnMainSync {
-                val view = overlays(activity.window.decorView)[citationPage]
+                val view = overlays(activity.window.decorView)[if (rightPage) 1 else 0]
                 val rect = PageDrawingGeometry.fitRect(view.width.toFloat(), view.height.toFloat(), model.getPageAspectRatio(citationPage))
                 val location = IntArray(2); view.getLocationOnScreen(location)
                 val scale = ReaderInkView::class.java.getDeclaredField("inputScale").apply { isAccessible = true }.getFloat(view)
@@ -153,7 +163,8 @@ class ReferenceInteractionTest {
             }
             await { findNode("GPT-4 technical report") != null }
             instrumentation.sendStatus(0, android.os.Bundle().apply { putString("stream", "Finger tap opened reference\n") })
-            assertEquals(0, model.uiState.value.currentPage)
+            assertEquals(if (bibliography) citationPage else 0, model.uiState.value.currentPage)
+            assertNotNull(findNode("Abrir paper completo"))
             var close = checkNotNull(findNode("Cerrar"))
             while (!close.isClickable && close.parent != null) close = close.parent
             assertTrue(close.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))

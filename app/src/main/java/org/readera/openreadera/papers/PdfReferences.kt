@@ -2,8 +2,10 @@ package org.readera.openreadera.papers
 
 import java.text.Normalizer
 
-data class CitationTarget(val text: String, val start: Int, val end: Int)
-data class PaperReference(val label: String?, val text: String, val page: Int)
+data class CitationTarget(val text: String, val start: Int, val end: Int, val reference: PaperReference? = null)
+data class ReferenceTextRange(val page: Int, val start: Int, val end: Int)
+data class PaperReference(val label: String?, val text: String, val page: Int,
+    val ranges: List<ReferenceTextRange> = emptyList())
 
 /** Local bibliography lookup; ambiguous matches remain visible rather than inventing metadata. */
 object PdfReferences {
@@ -38,18 +40,24 @@ object PdfReferences {
         var label: String? = null
         var style: String? = null
         var page = 0
+        var ranges = mutableListOf<ReferenceTextRange>()
         fun flush() {
             val body = text.toString().replace(Regex("(?<=\\p{L})-\\n(?=\\p{Ll})"), "")
                 .replace(Regex("\\s+"), " ").trim()
-            if (body.isNotEmpty() && (label != null || year.containsMatchIn(body))) output += PaperReference(label, body, page)
+            if (body.isNotEmpty() && (label != null || year.containsMatchIn(body))) output += PaperReference(label, body, page, ranges.toList())
             text = StringBuilder()
+            ranges = mutableListOf()
         }
         for ((pageNumber, source) in pages) {
             val header = heading.find(source)
             if (!inReferences && header == null) continue
-            val body = if (!inReferences) source.substring(header!!.range.last + 1) else source
+            val bodyStart = if (!inReferences) header!!.range.last + 1 else 0
+            val body = source.substring(bodyStart)
+            var lineOffset = bodyStart
             inReferences = true
             for (rawLine in body.lines()) {
+                val start = lineOffset
+                lineOffset += rawLine.length + 1
                 val line = rawLine.trim()
                 if (Regex("(?i)^(?:appendix|appendices|apéndice)(?:\\s|$)").containsMatchIn(line)) {
                     flush(); return output
@@ -71,7 +79,8 @@ object PdfReferences {
                     label = number?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }
                     page = pageNumber
                 } else if (text.isEmpty()) page = pageNumber
-                if (line.isNotEmpty()) text.append(number?.groupValues?.get(3) ?: line).append('\n')
+                ranges += ReferenceTextRange(pageNumber, start, start + rawLine.length)
+                text.append(number?.groupValues?.get(3) ?: line).append('\n')
             }
         }
         flush()
@@ -79,6 +88,7 @@ object PdfReferences {
     }
 
     fun resolve(target: CitationTarget, references: List<PaperReference>): List<PaperReference> {
+        target.reference?.let { return listOf(it) }
         if (target.text.startsWith("[")) {
             val labels = linkedSetOf<String>()
             for (piece in target.text.removeSurrounding("[", "]").split(',', ';')) {
