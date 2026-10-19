@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PdfReferencesTest {
+    @Test fun singleAuthorEntriesAndHyphenatedCitationResolveSeparately() {
+        val refs = PdfReferences.parse(listOf(9 to "References\nOpenAI. 2023. GPT-4 technical report.\nBen Kilby. 2021. Dialogic pedagogies.\nJonathan Osborne. 2010. Arguing to learn in science."))
+        assertEquals(3, refs.size)
+        val found = PdfReferences.resolve(CitationTarget("(Os-\nborne, 2010; Kilby, 2021)", 0, 31), refs)
+        assertEquals(listOf("Jonathan Osborne. 2010. Arguing to learn in science.",
+            "Ben Kilby. 2021. Dialogic pedagogies."), found.map { it.text })
+    }
+
     @Test fun yearStartingAContinuationLineDoesNotSwitchToNumberedReferences() {
         val refs = PdfReferences.parse(listOf(8 to "References\nDan Hendrycks, Collin Burns, and Jacob Steinhardt.\n2021. Measuring massive multitask language understanding.\nOpenAI. 2023. GPT-4 technical report."))
         assertEquals(2, refs.size)
