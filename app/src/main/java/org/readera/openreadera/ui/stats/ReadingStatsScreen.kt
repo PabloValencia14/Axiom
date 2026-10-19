@@ -30,7 +30,9 @@ fun ReadingStatsScreen(
 ) {
     val context = LocalContext.current
     val statsManager = remember { ReadingStatsManager(context) }
-    var stats by remember { mutableStateOf(statsManager.getStatsSummary()) }
+    val application = context.applicationContext as org.readera.openreadera.OpenReadEraApplication
+    val completed by application.repository.getHaveRead().collectAsState(initial = emptyList())
+    val stats = statsManager.getStatsSummary().copy(completedBooks = completed.size)
 
 
     val isPhone = LocalConfiguration.current.screenWidthDp < 600

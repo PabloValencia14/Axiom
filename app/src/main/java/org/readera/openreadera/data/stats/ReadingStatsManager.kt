@@ -91,7 +91,10 @@ class ReadingStatsManager(context: Context) {
         val totalSecs = prefs.getLong("total_seconds", 0L)
         val totalHours = totalSecs / 3600f
 
-        val currentStreak = prefs.getInt("current_streak", 0)
+        val yesterdayStr = dateFormat.format(Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }.time)
+        val lastDay = prefs.getString("last_reading_date", null)
+        val currentStreak = if (lastDay == todayStr || lastDay == yesterdayStr)
+            prefs.getInt("current_streak", 0) else 0
         val bestStreak = prefs.getInt("best_streak", 0)
         val totalPagesRead = prefs.getInt("total_pages_read", 0)
         val completedBooks = prefs.getInt("completed_books", 0)

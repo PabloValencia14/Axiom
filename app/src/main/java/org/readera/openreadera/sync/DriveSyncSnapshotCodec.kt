@@ -38,9 +38,10 @@ internal data class DriveSnapshotContents(
 )
 
 internal object DriveSyncSnapshotCodec {
-    const val CURRENT_VERSION = 3
+    const val CURRENT_VERSION = 4
 
     fun encode(contents: DriveSnapshotContents): String {
+        val booksById = contents.books.associateBy { it.id }
         val bookIds = contents.books.associate { it.id to BookSyncIdentity.of(it) }
         val collectionIds = contents.collections.associate { it.id to collectionSyncId(it) }
         val root = JSONObject().apply {
@@ -67,6 +68,7 @@ internal object DriveSyncSnapshotCodec {
                         put("status", book.status.name)
                         put("dateAdded", book.dateAdded)
                         put("lastOpened", book.lastOpened)
+                        put("metadataUpdatedAt", book.metadataUpdatedAt)
                         putNullable("series", book.series)
                         putNullable("seriesIndex", book.seriesIndex)
                         putNullable("collectionName", book.collectionName)
@@ -92,11 +94,13 @@ internal object DriveSyncSnapshotCodec {
                         put("id", bookmark.id)
                         put("bookId", bookmark.bookId)
                         put("bookSyncId", bookSyncId)
-                        put("syncId", stableId(bookSyncId, bookmark.page, bookmark.title, bookmark.snippet, bookmark.createdAt))
+                        put("syncId", org.readera.openreadera.data.model.AnnotationIdentity.of(booksById.getValue(bookmark.bookId), bookmark))
                         put("page", bookmark.page)
                         put("title", bookmark.title)
                         put("snippet", bookmark.snippet)
                         put("createdAt", bookmark.createdAt)
+                        put("updatedAt", bookmark.updatedAt)
+                        put("deletedAt", bookmark.deletedAt)
                     })
                 }
             })
@@ -107,12 +111,14 @@ internal object DriveSyncSnapshotCodec {
                         put("id", quote.id)
                         put("bookId", quote.bookId)
                         put("bookSyncId", bookSyncId)
-                        put("syncId", stableId(bookSyncId, quote.page, quote.text, quote.note, quote.colorHex, quote.createdAt))
+                        put("syncId", org.readera.openreadera.data.model.AnnotationIdentity.of(booksById.getValue(quote.bookId), quote))
                         put("page", quote.page)
                         put("text", quote.text)
                         put("note", quote.note)
                         put("colorHex", quote.colorHex)
                         put("createdAt", quote.createdAt)
+                        put("updatedAt", quote.updatedAt)
+                        put("deletedAt", quote.deletedAt)
                     })
                 }
             })
@@ -229,7 +235,7 @@ internal object DriveSyncSnapshotCodec {
             }
         }
         root.put("version", CURRENT_VERSION)
-        root.put("migrationSourceVersion", sourceVersion)
+        root.put("migrationSourceVersion", original.optInt("migrationSourceVersion", sourceVersion).coerceIn(1, sourceVersion))
         return root
     }
 

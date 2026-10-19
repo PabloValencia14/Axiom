@@ -47,5 +47,6 @@ data class Book(
     val rating: Float? = null,
     val reviewDate: Long? = null,
     val reviewTags: String? = null,
-    val fileCount: Int = 1
+    val fileCount: Int = 1,
+    @ColumnInfo(defaultValue = "0") val metadataUpdatedAt: Long = 0L
 )

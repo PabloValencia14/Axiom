@@ -6,10 +6,10 @@ import org.readera.openreadera.data.model.Bookmark
 
 @Dao
 interface BookmarkDao {
-    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId ORDER BY page ASC, createdAt DESC")
+    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId AND deletedAt = 0 ORDER BY page ASC, createdAt DESC")
     fun getBookmarksForBook(bookId: Long): Flow<List<Bookmark>>
 
-    @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
+    @Query("SELECT * FROM bookmarks WHERE deletedAt = 0 ORDER BY createdAt DESC")
     fun getAllBookmarks(): Flow<List<Bookmark>>
 
     @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
@@ -18,15 +18,40 @@ interface BookmarkDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(bookmark: Bookmark): Long
 
+    @Query("SELECT * FROM bookmarks WHERE id = :id")
+    suspend fun byId(id: Long): Bookmark?
+
+    @Query("SELECT * FROM books WHERE id = :id")
+    suspend fun annotationBook(id: Long): org.readera.openreadera.data.model.Book?
+
     @Update
-    suspend fun update(bookmark: Bookmark)
+    suspend fun mergeRecord(bookmark: Bookmark)
 
-    @Delete
-    suspend fun delete(bookmark: Bookmark)
+    @Transaction
+    suspend fun update(bookmark: Bookmark) {
+        val old = byId(bookmark.id) ?: return
+        if (old.deletedAt > 0L) return
+        val book = annotationBook(old.bookId) ?: return
+        val stableId = org.readera.openreadera.data.model.AnnotationIdentity.of(book, old)
+        mergeRecord(bookmark.copy(syncId = stableId, updatedAt = maxOf(System.currentTimeMillis(), old.updatedAt + 1), deletedAt = old.deletedAt))
+    }
 
-    @Query("DELETE FROM bookmarks WHERE bookId = :bookId AND page = :page")
-    suspend fun deleteByPage(bookId: Long, page: Int)
+    @Transaction
+    suspend fun delete(bookmark: Bookmark) {
+        val old = byId(bookmark.id) ?: return
+        if (old.deletedAt > 0L) return
+        val book = annotationBook(old.bookId) ?: return
+        val now = maxOf(System.currentTimeMillis(), old.updatedAt + 1)
+        mergeRecord(old.copy(title = "", snippet = "", syncId = org.readera.openreadera.data.model.AnnotationIdentity.of(book, old), updatedAt = now, deletedAt = now))
+    }
 
-    @Query("DELETE FROM bookmarks WHERE bookId = :bookId")
-    suspend fun deleteAllForBook(bookId: Long)
+    @Transaction
+    suspend fun deleteAllForBook(bookId: Long) {
+        getAllBookmarksList().filter { it.bookId == bookId && it.deletedAt == 0L }.forEach { delete(it) }
+    }
+
+    @Transaction
+    suspend fun deleteByPage(bookId: Long, page: Int) {
+        getAllBookmarksList().filter { it.bookId == bookId && it.page == page && it.deletedAt == 0L }.forEach { delete(it) }
+    }
 }

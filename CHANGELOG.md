@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0 — 2026-10-19
+
+- Preview bibliography entries by tapping a PDF citation or hovering over it for 450 ms in reading mode. Resolve numeric references/ranges and common author-year groups locally; show ambiguity or unavailable entries without inventing metadata or contacting a server. Jump to the reference page from the preview. Index at most the final 80 pages/1M characters; scanned or unusual bibliographies may not resolve.
+- Preserve quote/bookmark identities through edits and retain deleted records for synchronization. Deletions beat stale/offline edits; content and color edits update an existing annotation. Upgrade portable sync snapshots to v4: update all devices that share a library.
+- Separate metadata modification time from reading progress, fix pending/read toggle transitions, and normalize legacy contradictory states through non-destructive Room migration 5→6.
+- Record reading intervals using a monotonic clock, flush on pause/exit and during long pages, exclude background time, expire inactive streaks, and derive completed books from the library state.
+- Coalesce immediate Drive requests for 20 seconds, keep active work instead of replacing it, and process changes received during a sync. Existing attachment integrity checks remain enabled; battery improvement has not been benchmarked.
+- Verification: 179 JVM tests in 38 classes passed; debug, AndroidTest and release APKs built. Six Xiaomi Pad 7 debug instrumentation cases passed, including system-injected stylus tap/hover in the real reader, reference-page navigation, real-paper bibliography resolution, sync merge, existing-library migration and native/OCR/inking regression. The exact non-debuggable release APK passed real-paper lookup and existing-data preservation checks.
+- PDF translation compatibility and automatic language-quality limits from 1.1.0 remain; this release does not claim universal paper translation or integrate Unlimited-OCR.
+
 ## 1.1.0 — 2026-10-16
 
 - Replace the bilingual PDF band export with native prose replacement in the original paragraph bounds. Keep page count, boxes, rotations, image/vector placement, annotations and protected formula/citation glyphs. Fit by reducing multiline fonts up to 35%, single-line fonts up to 55%, and leading up to 10%; small text may require zoom. Reject overflow and collisions without publishing a partial copy, and show the failing content location. Historical band-export validation below does not validate this replacement.

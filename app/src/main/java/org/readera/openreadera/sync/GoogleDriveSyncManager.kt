@@ -472,15 +472,26 @@ class GoogleDriveSyncManager(
                     page = remote.optInt("page", 0),
                     title = remote.optString("title", "Señalador"),
                     snippet = remote.optString("snippet", ""),
-                    createdAt = remote.optLong("createdAt", System.currentTimeMillis())
+                    createdAt = remote.optLong("createdAt", 0L),
+                    syncId = remote.getString("syncId"),
+                    updatedAt = remote.optLong("updatedAt", 0L),
+                    deletedAt = remote.optLong("deletedAt", 0L)
                 )
-                if (bookmarks.none {
-                        it.bookId == candidate.bookId && it.page == candidate.page &&
-                            it.title == candidate.title && it.snippet == candidate.snippet
-                    }) {
+                val book = db.bookDao().getBookByIdSync(bookId) ?: continue
+                val existing = bookmarks.firstOrNull {
+                    it.bookId == bookId && (org.readera.openreadera.data.model.AnnotationIdentity.of(book, it) == candidate.syncId ||
+                        (root.optInt("migrationSourceVersion", 4) < 4 && it.page == candidate.page && it.createdAt == candidate.createdAt))
+                }
+                if (existing == null) {
                     val id = db.bookmarkDao().insert(candidate)
                     bookmarks.add(candidate.copy(id = id))
-                    bookmarksAdded++
+                    if (candidate.deletedAt == 0L) bookmarksAdded++
+                } else if (annotationRemoteWins(existing.updatedAt, existing.createdAt, existing.deletedAt,
+                        candidate.updatedAt, candidate.createdAt, candidate.deletedAt)) {
+                    val merged = candidate.copy(id = existing.id,
+                        syncId = org.readera.openreadera.data.model.AnnotationIdentity.of(book, existing))
+                    db.bookmarkDao().mergeRecord(merged)
+                    bookmarks[bookmarks.indexOf(existing)] = merged
                 }
             }
         }
@@ -497,15 +508,26 @@ class GoogleDriveSyncManager(
                     text = remote.optString("text", ""),
                     note = remote.optString("note", ""),
                     colorHex = remote.optString("colorHex", "#FFE082"),
-                    createdAt = remote.optLong("createdAt", System.currentTimeMillis())
+                    createdAt = remote.optLong("createdAt", 0L),
+                    syncId = remote.getString("syncId"),
+                    updatedAt = remote.optLong("updatedAt", 0L),
+                    deletedAt = remote.optLong("deletedAt", 0L)
                 )
-                if (quotes.none {
-                        it.bookId == candidate.bookId && it.page == candidate.page &&
-                            it.text == candidate.text && it.note == candidate.note
-                    }) {
+                val book = db.bookDao().getBookByIdSync(bookId) ?: continue
+                val existing = quotes.firstOrNull {
+                    it.bookId == bookId && (org.readera.openreadera.data.model.AnnotationIdentity.of(book, it) == candidate.syncId ||
+                        (root.optInt("migrationSourceVersion", 4) < 4 && it.page == candidate.page && it.createdAt == candidate.createdAt))
+                }
+                if (existing == null) {
                     val id = db.quoteDao().insert(candidate)
                     quotes.add(candidate.copy(id = id))
-                    quotesAdded++
+                    if (candidate.deletedAt == 0L) quotesAdded++
+                } else if (annotationRemoteWins(existing.updatedAt, existing.createdAt, existing.deletedAt,
+                        candidate.updatedAt, candidate.createdAt, candidate.deletedAt)) {
+                    val merged = candidate.copy(id = existing.id,
+                        syncId = org.readera.openreadera.data.model.AnnotationIdentity.of(book, existing))
+                    db.quoteDao().mergeRecord(merged)
+                    quotes[quotes.indexOf(existing)] = merged
                 }
             }
         }
@@ -720,35 +742,43 @@ class GoogleDriveSyncManager(
             reviewDate = remote.optLong("reviewDate", 0L)
                 .takeIf { remote.has("reviewDate") && !remote.isNull("reviewDate") },
             reviewTags = remoteText(remote, "reviewTags", null),
-            fileCount = remote.optInt("fileCount", 1).coerceAtLeast(1)
+            fileCount = remote.optInt("fileCount", 1).coerceAtLeast(1),
+            metadataUpdatedAt = remote.optLong("metadataUpdatedAt", 0L)
         )
     }
 
     private fun mergeBook(local: Book, remote: JSONObject): Book {
         val remoteLastOpened = remote.optLong("lastOpened", 0L)
-        val remoteWins = remoteLastOpened > local.lastOpened ||
-            (remoteLastOpened == local.lastOpened && local.lastOpened == 0L)
-        if (!remoteWins) return local
+        val newerReadingState = remoteLastOpened > maxOf(local.lastOpened, local.metadataUpdatedAt)
+        val progress = if (remoteLastOpened > local.lastOpened) local.copy(
+            status = if (newerReadingState && !local.isHaveRead) BookStatus.READING else local.status,
+            isToRead = if (newerReadingState) false else local.isToRead,
+            currentPage = remote.optInt("currentPage", local.currentPage),
+            totalPages = remote.optInt("totalPages", local.totalPages).coerceAtLeast(1),
+            progressPercent = remote.optDouble("progressPercent", local.progressPercent.toDouble()).toFloat(),
+            lastOpened = remoteLastOpened
+        ) else local
+        val remoteUpdated = remote.optLong("metadataUpdatedAt", 0L)
+        val remoteWins = remoteUpdated > local.metadataUpdatedAt ||
+            (remoteUpdated == 0L && local.metadataUpdatedAt == 0L &&
+                (remoteLastOpened > local.lastOpened || local.lastOpened == 0L))
+        if (!remoteWins) return progress
 
-        return local.copy(
+        return progress.copy(
+            metadataUpdatedAt = remoteUpdated,
             title = remote.optString("title", local.title),
             author = remote.optString("author", local.author),
             format = remote.optString("format", local.format),
             fileSize = remote.optLong("fileSize", local.fileSize),
-            currentPage = remote.optInt("currentPage", local.currentPage),
-            totalPages = remote.optInt("totalPages", local.totalPages).coerceAtLeast(1),
-            progressPercent = remote.optDouble("progressPercent", local.progressPercent.toDouble()).toFloat(),
             isFavorite = remote.optBoolean("isFavorite", local.isFavorite),
             isToRead = remote.optBoolean("isToRead", local.isToRead),
             isHaveRead = remote.optBoolean("isHaveRead", local.isHaveRead),
             isTrash = remote.optBoolean("isTrash", local.isTrash),
             status = parseStatus(remote.optString("status"), local.status),
             dateAdded = remote.optLong("dateAdded", local.dateAdded),
-            lastOpened = remote.optLong("lastOpened", local.lastOpened),
             series = remoteText(remote, "series", local.series),
-            seriesIndex = if (remote.has("seriesIndex") && !remote.isNull("seriesIndex")) {
-                remote.optInt("seriesIndex")
-            } else local.seriesIndex,
+            seriesIndex = if (!remote.has("seriesIndex")) local.seriesIndex
+                else if (remote.isNull("seriesIndex")) null else remote.optInt("seriesIndex"),
             collectionName = remoteText(remote, "collectionName", local.collectionName),
             sha1 = remoteText(remote, "sha1", local.sha1),
             language = remoteText(remote, "language", local.language),
@@ -756,17 +786,17 @@ class GoogleDriveSyncManager(
             description = remoteText(remote, "description", local.description),
             annotation = remoteText(remote, "annotation", local.annotation),
             review = remoteText(remote, "review", local.review),
-            rating = remote.optDouble("rating", (local.rating ?: 0f).toDouble()).toFloat().takeIf { it > 0f },
-            reviewDate = if (remote.has("reviewDate") && !remote.isNull("reviewDate")) {
-                remote.optLong("reviewDate")
-            } else local.reviewDate,
+            rating = if (!remote.has("rating")) local.rating else if (remote.isNull("rating")) null
+                else remote.optDouble("rating", 0.0).toFloat().takeIf { it > 0f },
+            reviewDate = if (!remote.has("reviewDate")) local.reviewDate
+                else if (remote.isNull("reviewDate")) null else remote.optLong("reviewDate"),
             reviewTags = remoteText(remote, "reviewTags", local.reviewTags),
             fileCount = remote.optInt("fileCount", local.fileCount).coerceAtLeast(1)
         )
     }
 
     private fun remoteText(remote: JSONObject, name: String, current: String?): String? =
-        if (!remote.has(name) || remote.isNull(name)) current else remote.optString(name).takeIf { it.isNotBlank() }
+        if (!remote.has(name)) current else if (remote.isNull(name)) null else remote.optString(name).takeIf { it.isNotBlank() }
 
     private fun parseStatus(value: String, fallback: BookStatus = BookStatus.UNREAD): BookStatus =
         runCatching { BookStatus.valueOf(value) }.getOrDefault(fallback)

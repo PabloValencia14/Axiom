@@ -81,59 +81,59 @@ interface BookDao {
         series: String?
     )
 
-    @Query("UPDATE books SET currentPage = :page, progressPercent = :progress, totalPages = CASE WHEN :totalPages > 1 THEN :totalPages ELSE totalPages END, lastOpened = :lastOpened, status = 'READING' WHERE id = :id")
+    @Query("UPDATE books SET currentPage = :page, progressPercent = :progress, totalPages = CASE WHEN :totalPages > 1 THEN :totalPages ELSE totalPages END, lastOpened = :lastOpened, status = CASE WHEN isHaveRead = 1 THEN 'HAVE_READ' ELSE 'READING' END, isToRead = 0 WHERE id = :id")
     suspend fun updateProgress(id: Long, page: Int, progress: Float, totalPages: Int = 1, lastOpened: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET status = 'UNREAD' WHERE id = :id")
-    suspend fun removeFromReadingNow(id: Long)
+    @Query("UPDATE books SET status = 'UNREAD', metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun removeFromReadingNow(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET status = 'READING', lastOpened = :now WHERE id = :id")
+    @Query("UPDATE books SET status = CASE WHEN isHaveRead = 1 THEN 'HAVE_READ' ELSE 'READING' END, isToRead = 0, lastOpened = :now WHERE id = :id")
     suspend fun markAsReading(id: Long, now: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isFavorite = :isFavorite WHERE id = :id")
-    suspend fun setFavorite(id: Long, isFavorite: Boolean)
+    @Query("UPDATE books SET isFavorite = :isFavorite, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun setFavorite(id: Long, isFavorite: Boolean, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isFavorite = CASE WHEN isFavorite = 1 THEN 0 ELSE 1 END WHERE id = :id")
-    suspend fun toggleFavorite(id: Long)
+    @Query("UPDATE books SET isFavorite = CASE WHEN isFavorite = 1 THEN 0 ELSE 1 END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun toggleFavorite(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isToRead = CASE WHEN isToRead = 1 THEN 0 ELSE 1 END, status = CASE WHEN isToRead = 0 THEN 'TO_READ' ELSE status END WHERE id = :id")
-    suspend fun toggleToRead(id: Long)
+    @Query("UPDATE books SET isToRead = CASE WHEN isToRead = 1 THEN 0 ELSE 1 END, isHaveRead = CASE WHEN isToRead = 0 THEN 0 ELSE isHaveRead END, status = CASE WHEN isToRead = 0 THEN 'TO_READ' WHEN status = 'TO_READ' THEN 'UNREAD' ELSE status END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun toggleToRead(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isHaveRead = CASE WHEN isHaveRead = 1 THEN 0 ELSE 1 END, status = CASE WHEN isHaveRead = 0 THEN 'HAVE_READ' ELSE status END WHERE id = :id")
-    suspend fun toggleHaveRead(id: Long)
+    @Query("UPDATE books SET isHaveRead = CASE WHEN isHaveRead = 1 THEN 0 ELSE 1 END, isToRead = CASE WHEN isHaveRead = 0 THEN 0 ELSE isToRead END, status = CASE WHEN isHaveRead = 0 THEN 'HAVE_READ' WHEN status = 'HAVE_READ' THEN 'UNREAD' ELSE status END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun toggleHaveRead(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isTrash = 1 WHERE id = :id")
-    suspend fun moveToTrash(id: Long)
+    @Query("UPDATE books SET isTrash = 1, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun moveToTrash(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isTrash = 0 WHERE id = :id")
-    suspend fun restoreFromTrash(id: Long)
+    @Query("UPDATE books SET isTrash = 0, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun restoreFromTrash(id: Long, modifiedAt: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM books WHERE isTrash = 1")
     suspend fun emptyTrash()
 
-    @Query("UPDATE books SET status = :status WHERE id = :id")
-    suspend fun setStatus(id: Long, status: BookStatus)
+    @Query("UPDATE books SET status = :status, isToRead = CASE WHEN :status = 'TO_READ' THEN 1 ELSE 0 END, isHaveRead = CASE WHEN :status = 'HAVE_READ' THEN 1 ELSE 0 END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun setStatus(id: Long, status: BookStatus, modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET status = 'UNREAD' WHERE isTrash = 0 AND status = 'READING'")
-    suspend fun clearReadingNow()
+    @Query("UPDATE books SET status = 'UNREAD', metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE isTrash = 0 AND status = 'READING'")
+    suspend fun clearReadingNow(modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isFavorite = 0 WHERE isTrash = 0")
-    suspend fun clearFavorites()
+    @Query("UPDATE books SET isFavorite = 0, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE isTrash = 0")
+    suspend fun clearFavorites(modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isToRead = 0, status = CASE WHEN status = 'TO_READ' THEN 'UNREAD' ELSE status END WHERE isTrash = 0")
-    suspend fun clearToRead()
+    @Query("UPDATE books SET isToRead = 0, status = CASE WHEN status = 'TO_READ' THEN 'UNREAD' ELSE status END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE isTrash = 0")
+    suspend fun clearToRead(modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET isHaveRead = 0, status = CASE WHEN status = 'HAVE_READ' THEN 'UNREAD' ELSE status END WHERE isTrash = 0")
-    suspend fun clearHaveRead()
+    @Query("UPDATE books SET isHaveRead = 0, status = CASE WHEN status = 'HAVE_READ' THEN 'UNREAD' ELSE status END, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE isTrash = 0")
+    suspend fun clearHaveRead(modifiedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE books SET title = :title, author = :author, series = :series, annotation = :annotation, language = :language WHERE id = :id")
-    suspend fun updateMetadata(id: Long, title: String, author: String, series: String?, annotation: String?, language: String?)
+    @Query("UPDATE books SET title = :title, author = :author, series = :series, annotation = :annotation, language = :language, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun updateMetadata(id: Long, title: String, author: String, series: String?, annotation: String?, language: String?, modifiedAt: Long = System.currentTimeMillis())
 
     @Query("SELECT * FROM books WHERE isTrash = 0 AND rating IS NOT NULL AND rating > 0 ORDER BY reviewDate DESC, lastOpened DESC")
     fun getReviewedBooks(): Flow<List<Book>>
 
-    @Query("UPDATE books SET rating = :rating, review = :review, reviewDate = :reviewDate, reviewTags = :reviewTags WHERE id = :id")
-    suspend fun updateReview(id: Long, rating: Float?, review: String?, reviewDate: Long? = System.currentTimeMillis(), reviewTags: String? = null)
+    @Query("UPDATE books SET rating = :rating, review = :review, reviewDate = :reviewDate, reviewTags = :reviewTags, metadataUpdatedAt = MAX(metadataUpdatedAt + 1, :modifiedAt) WHERE id = :id")
+    suspend fun updateReview(id: Long, rating: Float?, review: String?, reviewDate: Long? = System.currentTimeMillis(), reviewTags: String? = null, modifiedAt: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM books WHERE filePath NOT LIKE :prefix || '%'")
     suspend fun deleteBooksNotInDirectory(prefix: String)

@@ -2,6 +2,14 @@
 
 Axiom es una aplicación Android de código abierto para leer y anotar documentos. Incluye biblioteca y progreso locales; lector de EPUB, TXT/Markdown, FB2, DOCX y PDF; cómics CBZ; conversión local de MOBI/AZW/AZW3 sin DRM a EPUB; búsqueda, marcadores, notas y escritura con stylus. En PDF incluye edición no destructiva de páginas, OCR/copia buscable y exportación de páginas a imagen o texto. Las firmas visuales de PDF son anotaciones, no firmas criptográficas.
 
+## Referencias de papers y coherencia de datos (1.2.0)
+
+En modo lectura de PDF, toca una cita o mantén el cursor del lápiz encima unos 450 ms para consultar su entrada bibliográfica y saltar a la página de referencias. Se reconocen citas numéricas y grupos comunes de autor/año; la consulta usa el propio PDF, sin enviar texto a servicios externos. Si hay varias coincidencias se muestran como tales; si no se puede resolver, se indica. El modo de escritura conserva sus gestos. La indexación se limita a las últimas 80 páginas y un millón de caracteres; bibliografías escaneadas o con disposición no reconocida pueden no resolverse.
+
+La base de datos pasa de versión 5 a 6 mediante migración sin borrado de biblioteca. Las notas y marcadores mantienen identidad al editarse y conservan registros de borrado sin su contenido para impedir que reaparezcan desde Drive. Las instantáneas de sincronización pasan a v4: actualiza todos los dispositivos de una misma biblioteca. Las ediciones de metadatos y el progreso usan marcas temporales separadas. Se corrigen los estados pendiente/leído, el registro de sesiones y el vencimiento de rachas; los completados se obtienen de los libros marcados como leídos. Las solicitudes inmediatas de Drive se agrupan durante 20 segundos y no cancelan el trabajo activo.
+
+Verificación de 1.2.0 (2026-10-19): 179 pruebas JVM en 38 clases superadas, sin fallos ni omisiones; compilados debug, AndroidTest y release. En Xiaomi Pad 7 pasaron seis pruebas instrumentadas, incluyendo toque y hover de stylus inyectados a través del lector real, salto a bibliografía, resolución de citas en un paper real, migración de biblioteca y regresión de OCR/escritura. El APK release sin depuración superó también la consulta del paper y la comparación de los datos existentes con una copia consistente previa a la migración. Esto no sustituye una evaluación del comportamiento físico de todos los lápices ni valida cualquier bibliografía.
+
 ## OCR y privacidad
 
 El OCR y la generación de capas de texto PDF usan Google ML Kit Text Recognition con modelo latino incluido. No se anuncia reconocimiento de alfabetos no latinos. El escáner de documentos usa ML Kit Document Scanner y puede obtener componentes mediante Google Play Services. El OCR procesa localmente el documento seleccionado; Axiom no envía automáticamente documentos a un servidor propio.
