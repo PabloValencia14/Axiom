@@ -80,13 +80,6 @@ internal class ReaderInkView(context: Context) : FrameLayout(context) {
     private var anchor: DrawingPageAnchor? = null
     private var textWords: List<InkTextWord> = emptyList()
     private var appliedTextLayout: PageTextLayout? = null
-    var onCitation: ((org.readera.openreadera.papers.CitationTarget) -> Unit)? = null
-    private var referenceDown: org.readera.openreadera.papers.CitationTarget? = null
-    private var referenceX = 0f
-    private var referenceY = 0f
-    private var referenceCancelled = false
-    private var hoverTarget: org.readera.openreadera.papers.CitationTarget? = null
-    private var hoverAction: Runnable? = null
     private var writingMode = false
     private var inputScale = 1f
     private var records: List<DrawingStroke> = emptyList()
@@ -128,11 +121,6 @@ internal class ReaderInkView(context: Context) : FrameLayout(context) {
         }
         if (changedPage || this.tool != tool || this.color != color || strokeWidth != width ||
             this.writingMode != writingMode || this.inputScale != inputScale) cancelGesture()
-        if (changedPage || writingMode) {
-            hoverAction?.let(::removeCallbacks)
-            hoverTarget = null
-            referenceDown = null
-        }
         if (changedPage) {
             pending.clear()
             erased.clear()
@@ -282,48 +270,7 @@ internal class ReaderInkView(context: Context) : FrameLayout(context) {
         for (r in rectangles) canvas.drawRect(r.left, r.top, r.right, r.bottom, paint)
     }
 
-    private fun citationAt(x: Float, y: Float): org.readera.openreadera.papers.CitationTarget? {
-        if (onCitation == null || writingMode || rect.width <= 0f || rect.height <= 0f) return null
-        val px = (x / inputScale - rect.left) / rect.width
-        val py = (y / inputScale - rect.top) / rect.height
-        val layout = appliedTextLayout ?: return null
-        val word = layout.words.firstOrNull { it.bounds.contains(px, py) } ?: return null
-        return org.readera.openreadera.engine.PdfReferenceText.citationAt(layout, word)
-    }
-
-    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
-        val target = if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT) null
-            else citationAt(event.x, event.y)
-        if (target != hoverTarget) {
-            hoverAction?.let(::removeCallbacks)
-            hoverTarget = target
-            hoverAction = target?.let { value -> Runnable { if (hoverTarget == value && !writingMode) onCitation?.invoke(value) } }
-            hoverAction?.let { postDelayed(it, 450L) }
-        }
-        return target != null || super.dispatchHoverEvent(event)
-    }
-
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        if (!writingMode) {
-            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                referenceDown = citationAt(event.x, event.y)
-                referenceX = event.x; referenceY = event.y; referenceCancelled = false
-            }
-            if (referenceDown != null) {
-                if (event.pointerCount > 1 || hypot(event.x - referenceX, event.y - referenceY) >
-                    android.view.ViewConfiguration.get(context).scaledTouchSlop) referenceCancelled = true
-                if (event.actionMasked == MotionEvent.ACTION_UP) {
-                    val target = referenceDown
-                    referenceDown = null
-                    if (!referenceCancelled && (event.flags and MotionEvent.FLAG_CANCELED) == 0 && target != null) {
-                        performClick()
-                        onCitation?.invoke(target)
-                    }
-                } else if (event.actionMasked == MotionEvent.ACTION_CANCEL) referenceDown = null
-                return true
-            }
-        }
-
         if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
             val consumed = gesture != null
             cancelGesture()
@@ -484,9 +431,6 @@ internal class ReaderInkView(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
-        hoverAction?.let(::removeCallbacks)
-        hoverTarget = null
-        referenceDown = null
         cancelGesture()
         super.onDetachedFromWindow()
     }

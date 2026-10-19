@@ -14,7 +14,7 @@ object PdfReferences {
     )
     private val heading = Regex("(?im)^\\s*(?:\\d+\\.?\\s+)?(?:references|bibliography|referencias|bibliografía)\\s*$")
     private val numbered = Regex("^\\s*(?:\\[(\\d{1,4})]|(\\d{1,4})[.)])\\s+(.+)$")
-    private val authorStart = Regex("^(?:[\\p{Lu}][\\p{L}.'’–-]*\\s+){1,4}[\\p{Lu}][\\p{L}'’–-]+(?:,|\\s+and\\s)|^[\\p{Lu}][\\p{L}'’–-]+[,.(]\\s*(?:18|19|20)\\d{2}|^[\\p{Lu}][\\p{L}'’–-]+,\\s*[\\p{Lu}]")
+    private val authorStart = Regex("^(?:[\\p{Lu}][\\p{L}.'’–-]*\\s+){1,4}[\\p{Lu}][\\p{L}'’–-]+(?:,|\\s+and\\s|\\.\\s*(?:18|19|20)\\d{2})|^[\\p{Lu}][\\p{L}'’–-]+[,.(]\\s*(?:18|19|20)\\d{2}|^[\\p{Lu}][\\p{L}'’–-]+,\\s*[\\p{Lu}]")
 
     fun at(text: String, offset: Int): CitationTarget? {
         for (match in citation.findAll(text)) {
@@ -90,7 +90,8 @@ object PdfReferences {
             }
             return references.filter { it.label in labels }
         }
-        return target.text.trim('(', ')').split(';').flatMap { part ->
+        return target.text.replace(Regex("(?<=\\p{L})-\\s*\\n\\s*(?=\\p{Ll})"), "")
+            .trim('(', ')').split(';').flatMap { part ->
             val date = year.find(part) ?: return@flatMap emptyList()
             val dates = year.findAll(part).map { it.value }.toSet()
             val author = part.substring(0, date.range.first).replace(Regex("(?i)et\\s+al\\.?"), "")

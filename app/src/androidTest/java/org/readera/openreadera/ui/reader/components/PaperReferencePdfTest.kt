@@ -29,6 +29,14 @@ class PaperReferencePdfTest {
             assertTrue("Brown 2020 must resolve", found.any { it.text.contains("few-shot", true) })
             assertTrue("Chung 2022 must resolve", found.any { it.text.contains("instruction-finetuned", true) })
             assertTrue("OpenAI 2023 must resolve", found.any { it.text.contains("GPT-4", true) })
+            val wrapped = engine.getPageTextLayout(1).let { layout ->
+                layout.words.firstNotNullOf { word -> PdfReferenceText.citationAt(layout, word)?.takeIf {
+                    it.text.contains("Kilby") && it.text.contains("2010")
+                } }
+            }
+            val singleAuthors = PdfReferences.resolve(wrapped, references)
+            assertTrue("Wrapped Osborne 2010 must resolve", singleAuthors.any { it.text.startsWith("Jonathan Osborne. 2010.") })
+            assertTrue("Single-author Kilby 2021 must resolve", singleAuthors.any { it.text.startsWith("Ben Kilby. 2021.") })
             val firstPage = engine.getPageTextLayout(0)
             val actualGroup = firstPage.words.mapNotNull { PdfReferenceText.citationAt(firstPage, it) }
                 .firstOrNull { it.text.contains("Brown") && it.text.contains("Chung") && it.text.contains("OpenAI") }

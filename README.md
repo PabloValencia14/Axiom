@@ -2,6 +2,12 @@
 
 Axiom es una aplicación Android de código abierto para leer y anotar documentos. Incluye biblioteca y progreso locales; lector de EPUB, TXT/Markdown, FB2, DOCX y PDF; cómics CBZ; conversión local de MOBI/AZW/AZW3 sin DRM a EPUB; búsqueda, marcadores, notas y escritura con stylus. En PDF incluye edición no destructiva de páginas, OCR/copia buscable y exportación de páginas a imagen o texto. Las firmas visuales de PDF son anotaciones, no firmas criptográficas.
 
+## Corrección de citas al ampliar páginas (1.2.1)
+
+La detección de citas sigue ahora las coordenadas de Compose, que coloca y amplía las páginas. Esto corrige toques que solo mostraban los controles del lector cuando la capa nativa quedaba fuera de su zona de recepción con zoom y doble página. La escritura conserva su capa nativa. Tambi�n se separan las entradas bibliogr�ficas de un solo autor con nombre y apellido y se recomponen los apellidos partidos por un guion de fin de l�nea al buscar la cita. Las pruebas anteriores de interacción de 1.2.0 cubrían una página sin ampliar y no detectaron este caso.
+
+Verificación de 1.2.1 (2026-10-19): 180 pruebas JVM superadas; en Xiaomi Pad 7, tres pruebas de interacción comprueban toque de dedo, hover de stylus inyectado, bloqueo de previsualización al escribir y salto a bibliografía, incluyendo ambas páginas de una vista doble ampliada. También pasan la regresión de OCR/escritura/navegación, el recorrido completo de citas con un paper real y la comparación de biblioteca, notas, marcadores y trazos con una copia consistente anterior al cambio. El hover inyectado no sustituye una prueba física con cada modelo de lápiz.
+
 ## Referencias de papers y coherencia de datos (1.2.0)
 
 En modo lectura de PDF, toca una cita o mantén el cursor del lápiz encima unos 450 ms para consultar su entrada bibliográfica y saltar a la página de referencias. Se reconocen citas numéricas y grupos comunes de autor/año; la consulta usa el propio PDF, sin enviar texto a servicios externos. Si hay varias coincidencias se muestran como tales; si no se puede resolver, se indica. El modo de escritura conserva sus gestos. La indexación se limita a las últimas 80 páginas y un millón de caracteres; bibliografías escaneadas o con disposición no reconocida pueden no resolverse.
