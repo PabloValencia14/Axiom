@@ -2,11 +2,21 @@
 
 Axiom es una aplicación Android de código abierto para leer y anotar documentos. Incluye biblioteca y progreso locales; lector de EPUB, TXT/Markdown, FB2, DOCX y PDF; cómics CBZ; conversión local de MOBI/AZW/AZW3 sin DRM a EPUB; búsqueda, marcadores, notas y escritura con stylus. En PDF incluye edición no destructiva de páginas, OCR/copia buscable y exportación de páginas a imagen o texto. Las firmas visuales de PDF son anotaciones, no firmas criptográficas.
 
+## Abrir el artículo completo desde una cita (1.3.0)
+
+La ventana de referencias incluye **Abrir paper completo**. Al pulsarlo, Axiom localiza el PDF, lo descarga, lo añade a la biblioteca con su título y autores y lo abre en el lector. La flecha de salida permite volver al documento original; al abrir de nuevo la misma referencia se reutiliza el PDF validado que ya se descargó.
+
+Se usan los identificadores de arXiv, los enlaces directos a PDF y los DOI incluidos en la referencia. Cuando no hay un enlace directo, se consulta [OpenAlex](https://help.openalex.org/api/) y se contrastan título, año y autor; una coincidencia dudosa o ambigua no provoca la descarga de otro artículo. Consultar la bibliografía sigue siendo local. La búsqueda y descarga se inician únicamente al pulsar el botón y necesitan Internet; se envía el título o identificador bibliográfico, nunca el documento que se está leyendo.
+
+La descarga requiere un PDF accesible sin iniciar sesión, usa destinos HTTPS públicos y valida el archivo con el lector PDF antes de guardarlo. Las descargas incompletas o respuestas HTML no se incorporan a la biblioteca. Límite: 100 MB por PDF; las bibliografías no reconocidas, los artículos sin copia pública identificable y los fallos o límites del proveedor se indican en la ventana.
+
+Verificación de 1.3.0 (2026-10-19): 187 pruebas JVM superadas. En Xiaomi Pad 7 pasan las pruebas de validación y reutilización del PDF, rechazo de HTML y destinos privados, interacción de citas y conservación de la biblioteca. El APK release supera también las comprobaciones del descargador, el índice de referencias de un paper real y la comparación con una copia consistente. Se ha comprobado la descarga y apertura de un artículo completo de 75 páginas desde una cita, la vuelta al documento original y su reapertura.
+
 ## Corrección de citas al ampliar páginas (1.2.1)
 
-La detección de citas sigue ahora las coordenadas de Compose, que coloca y amplía las páginas. Esto corrige toques que solo mostraban los controles del lector cuando la capa nativa quedaba fuera de su zona de recepción con zoom y doble página. La escritura conserva su capa nativa. Tambi�n se separan las entradas bibliogr�ficas de un solo autor con nombre y apellido y se recomponen los apellidos partidos por un guion de fin de l�nea al buscar la cita. Las pruebas anteriores de interacción de 1.2.0 cubrían una página sin ampliar y no detectaron este caso.
+La detección de citas sigue ahora las coordenadas de Compose, que coloca y amplía las páginas. Esto corrige toques que solo mostraban los controles del lector cuando la capa nativa quedaba fuera de su zona de recepción con zoom y doble página. La escritura conserva su capa nativa. También se separan las entradas bibliográficas de un solo autor con nombre y apellido y se recomponen los apellidos partidos por un guion de fin de línea al buscar la cita. Las pruebas anteriores de interacción de 1.2.0 cubrían una página sin ampliar y no detectaron este caso.
 
-Verificación de 1.2.1 (2026-10-19): 180 pruebas JVM superadas; en Xiaomi Pad 7, tres pruebas de interacción comprueban toque de dedo, hover de stylus inyectado, bloqueo de previsualización al escribir y salto a bibliografía, incluyendo ambas páginas de una vista doble ampliada. También pasan la regresión de OCR/escritura/navegación, el recorrido completo de citas con un paper real y la comparación de biblioteca, notas, marcadores y trazos con una copia consistente anterior al cambio. El hover inyectado no sustituye una prueba física con cada modelo de lápiz.
+Verificación de 1.2.1 (2026-10-19): 181 pruebas JVM superadas; en Xiaomi Pad 7, tres pruebas de interacción comprueban toque de dedo, hover de stylus inyectado, bloqueo de previsualización al escribir y salto a bibliografía, incluyendo ambas páginas de una vista doble ampliada. También pasan la regresión de OCR/escritura/navegación, el recorrido completo de citas con un paper real y la comparación de biblioteca, notas, marcadores y trazos con una copia consistente anterior al cambio. El hover inyectado no sustituye una prueba física con cada modelo de lápiz.
 
 ## Referencias de papers y coherencia de datos (1.2.0)
 
